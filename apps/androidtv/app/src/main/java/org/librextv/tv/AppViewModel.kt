@@ -633,8 +633,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * 探测有内容的分类（首页分类入口只显示这些）。
      *
      * 用户反馈「少儿分类无任何影片时应该把入口藏起来」——点进去空页面体验很差。
-     * 探测本身要打 8 个分类 × 每个源（约 8 秒），所以结果按源签名落到 DataStore，
-     * 下次启动直接按上次结论渲染，后台再刷新，避免首页按钮先全显示再少一个。
+     * 探测走 fast 模式：只读各源的分类表（有 6 小时缓存），不再为 8 个分类各抓一遍
+     * 内容 —— 老做法是 8 × 源数 次内容请求，13 个源实测两分钟级，还会和用户随后
+     * 点进分类抢同一批连接。结果按源签名落到 DataStore，下次启动直接按上次结论
+     * 渲染，后台再刷新，避免首页按钮先全显示再少一个。
      */
     fun probeCategories(force: Boolean = false) {
         val sources = _data.value.activeSources()

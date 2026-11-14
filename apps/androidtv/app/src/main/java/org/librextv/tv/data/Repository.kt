@@ -1,10 +1,14 @@
 package org.librextv.tv.data
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -361,13 +365,50 @@ class Repository(private val net: Net = Net) {
     /** 分类表缓存（6 小时内复用，切分类不重复打上游）。分类页会并行抓多个源，必须并发安全 */
     private val categoryCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<SourceCategory>>>()
 
+    /**
+     * 正在拉取的分类表。
+     *
+     * 首页探测会同时问 8 个分类，而分类表缓存要等响应回来才写入 —— 只靠缓存的话
+     * 这 8 个请求会全部落空，同一个 `?ac=list` 被每个源打 8 遍（13 源 = 104 次）。
+     * 这里让同一地址的并发调用共用一次请求，后来的等前面的结果。
+     */
+    private val categoryInflight =
+        java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<List<SourceCategory>>>()
+
     private suspend fun categoriesOf(source: VodSource): List<SourceCategory> {
         val cached = categoryCache[source.url]
-        if (cached != null && System.currentTimeMillis() - cached.first < 6 * 60 * 60 * 1000L) return cached.second
-        val base = source.url.trimEnd('/')
-        val categories = Categories.parse(Net.gated(source.url) { net.getText("$base?ac=list&pg=1") })
-        categoryCache[source.url] = System.currentTimeMillis() to categories
-        return categories
+        if (cached != null && System.currentTimeMillis() - cached.first < CATEGORY_TTL_MS) return cached.second
+
+        val running = categoryInflight[source.url]
+        if (running != null) {
+            return try {
+                running.await()
+            } catch (err: CancellationException) {
+                // 发起方被取消（切分类/离开首页）不代表这张表真的拿不到：
+                // 换个协程重新拉一次，而不是把取消传染给等它的人。
+                if (!currentCoroutineContext().isActive) throw err
+                categoryInflight.remove(source.url, running)
+                categoriesOf(source)
+            }
+        }
+
+        val mine = CompletableDeferred<List<SourceCategory>>()
+        if (categoryInflight.putIfAbsent(source.url, mine) != null) {
+            // 极短窗口里被别人先占了：退回等待分支
+            return categoriesOf(source)
+        }
+        try {
+            val base = source.url.trimEnd('/')
+            val categories = Categories.parse(Net.gated(source.url) { net.getText("$base?ac=list&pg=1") })
+            categoryCache[source.url] = System.currentTimeMillis() to categories
+            mine.complete(categories)
+            return categories
+        } catch (err: Throwable) {
+            mine.completeExceptionally(err)
+            throw err
+        } finally {
+            categoryInflight.remove(source.url, mine)
+        }
     }
 
     /**
@@ -454,6 +495,12 @@ class Repository(private val net: Net = Net) {
 
     private companion object {
         const val BROWSE_TTL_MS = 5 * 60 * 1000L
+
+        /** 分类表缓存时长：分类树很少变，6 小时足够，换源/重启后会重新拉 */
+        const val CATEGORY_TTL_MS = 6 * 60 * 60 * 1000L
+
+        /** 首页分类探测的总预算：到点就带已有结论返回，慢源不该拖住首屏 */
+        const val PROBE_BUDGET_MS = 15_000L
 
         /** 「源没有这个分类」的标记：既不计数成功，也不计入失败数 */
         const val UNSUPPORTED_NOTE = "__unsupported__"
@@ -638,15 +685,39 @@ class Repository(private val net: Net = Net) {
     /**
      * 探测哪些分类真的有内容（首页只显示有内容的分类入口）。
      *
-     * 每个分类只抓 1 页、每源最多 1 个子分类，开销可控；分类表本身有 6 小时缓存，
-     * 二次进入首页几乎零开销。结果按 [CategoryKey.home] 的行程序返回。
+     * [fast] 默认开启：只看分类表里有没有对应 type_id，不发内容请求。
+     * 老做法要 8 个分类 × 每个源各抓一次列表，13 个源实测两分钟级，首页启动时
+     * 和用户点进分类抢同一批请求；只看分类表只需要源数那么多次（且有 6 小时缓存）。
+     * 代价是「源声明了分类但内容为空」时会高估，那种情况用户点进去看到空页，
+     * 比等两分钟好。
+     *
+     * [budgetMs] 是整轮探测的墙钟上限：到点就带已有结论返回，慢源不拖首屏。
+     * 结果按 [CategoryKey.home] 的行程序返回。
      */
     suspend fun probeCategories(
         sources: List<VodSource>,
         adultFilter: Boolean = true,
         typeLimit: Int = 1,
         timeoutMs: Long = 12_000,
+        fast: Boolean = true,
+        budgetMs: Long = PROBE_BUDGET_MS,
     ): Map<CategoryKey, Int> = coroutineScope {
+        if (sources.isEmpty()) return@coroutineScope CategoryKey.home.associateWith { 0 }
+
+        if (fast) {
+            val tables: List<List<SourceCategory>?> = withTimeoutOrNull(budgetMs) {
+                sources.map { source ->
+                    async {
+                        // 单源失败/超时只影响它自己：null 表示这张表这次没拿到
+                        withTimeoutOrNull(timeoutMs) { runCatching { categoriesOf(source) }.getOrNull() }
+                    }
+                }.awaitAll()
+            } ?: List(sources.size) { null }
+            return@coroutineScope CategoryKey.home.associateWith { key ->
+                tables.count { table -> table != null && Categories.typeIds(table, key, 1).isNotEmpty() }
+            }
+        }
+
         CategoryKey.home.map { key ->
             async {
                 var hits = 0

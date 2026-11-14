@@ -475,6 +475,8 @@ adb -s emulator-5556 shell am start -n org.librextv.tv/.MainActivity
 
 同时 `catalogLimiter` 的全局并发从 **6 提到 12**（`CATALOG_LIMITER_CONCURRENCY`）：13 个源在 6 个槽位里要排 3 轮，一个慢源就占住两轮，这是 44.6 秒的主要来源。单源并发另有 `sourceLimiter(3)` 兜底，放宽全局不会打爆某个站。`limiter.test.ts` 的断言从硬编码 6 改为引用该常量。
 
+Android 电视版 / 手机版共用同一套 `Repository`，也做了同构的两处改动（1.3.11 起）：`categoriesOf` 支持在途去重（`categoryInflight`，发起方被取消时不把取消传染给等它的人）；`probeCategories` 默认 `fast = true`，只读各源分类表判定 `type_id` 是否存在，并加 15 秒总预算（`PROBE_BUDGET_MS`），老做法是「8 个分类 × 每源各抓一次列表」且单源串行，13 源要两分钟级。模拟器实测「点电影到首屏」11.3 s / 5.8 s → 3.1 s / 2.9 s（模拟器里多数源被地区限制，只有 1 个源能出内容，真机受益更大）。
+
 ### TV：焦点移上去就切换并加载
 
 桌面端分类页靠点击切换，TV 端原本也必须按一次 OK。现在**分类胶囊和顶部导航都加了「焦点即切换」**：遥控器一路划过去，页面内容和当前页就跟着换。
