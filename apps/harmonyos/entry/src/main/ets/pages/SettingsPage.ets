@@ -187,7 +187,7 @@ export struct SettingsPage {
           // ---- 关于 ----
           SectionTitle({ title: '关于' })
           Column({ space: 6 }) {
-            HintLine({ text: 'LibreXTV 鸿蒙手机版 1.3.10' })
+            HintLine({ text: 'LibreXTV 鸿蒙手机版 1.3.11' })
             HintLine({ text: '内置源均为第三方公开接口，与本项目无隶属关系，仅作开箱即用的示例。' })
             HintLine({ text: '本应用不存储、不转存任何视频内容，所有播放地址来自第三方采集接口。' })
             HintLine({ text: 'AGPL-3.0 许可 · 源码见 github.com/xuxue04403/LibreXTV' })

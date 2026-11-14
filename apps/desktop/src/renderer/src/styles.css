@@ -263,6 +263,87 @@ select {
   gap: 18px;
 }
 
+/* ---------- 单行横向滚动（首页四个板块） ---------- */
+/*
+ * 与 .grid 的区别：不换行。放不下的内容留在右侧，靠滚动看。
+ * 留着 .grid 给分类页、搜索结果这些「本来就该铺满」的场景用。
+ */
+.hscroll {
+  position: relative;
+}
+
+.hscroll-track {
+  display: flex;
+  gap: 18px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* 卡片 hover 会 translateY(-4px)，上下各留一点空间，免得被裁掉一条 */
+  padding: 6px 0 12px;
+  margin: -6px 0 -12px;
+  scroll-behavior: smooth;
+  scroll-padding-left: 2px;
+  /* 滚动条平时不显形，鼠标进到这一行才浮出来，免得每行底下都挂一条灰杠 */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.hscroll:hover .hscroll-track {
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+.hscroll-track::-webkit-scrollbar {
+  height: 6px;
+}
+.hscroll-track::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+.hscroll:hover .hscroll-track::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+.hscroll-track::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.hscroll-track > * {
+  flex: 0 0 auto;
+  width: 168px;
+}
+/* 胶囊按钮这类不能定宽的：宽度跟着文字走 */
+.hscroll-track.auto > * {
+  width: auto;
+}
+
+.hscroll-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(24, 29, 38, 0.92);
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: 0.16s ease;
+  backdrop-filter: blur(6px);
+}
+.hscroll-nav:hover {
+  border-color: rgba(255, 107, 61, 0.5);
+  color: var(--accent);
+  background: rgba(30, 36, 47, 0.96);
+}
+.hscroll-nav.left {
+  left: -14px;
+}
+.hscroll-nav.right {
+  right: -14px;
+}
+
 .card {
   position: relative;
   border-radius: var(--radius);

@@ -352,9 +352,32 @@ export interface CategoryBrowseOptions {
    * 不需要自己做增量合并（那正是最容易出错的地方）。
    */
   onPartial?: (items: SearchResultItem[], outcomes: CategorySourceOutcome[]) => void;
+  /**
+   * 整轮浏览的墙钟预算（毫秒，默认 15 秒）。
+   *
+   * 没有预算时最坏耗时是「所有源的超时之和」：13 个源里只要有两个在限流，
+   * 光它们的 4 个子分类 × 12 秒就能把一次分类浏览拖到一分钟（实测
+   * 44.6 秒，其中 4 个源各自贡献 20~44 秒）。有了预算，到点就带着已经
+   * 收到的内容返回，没答复的源标记为超时——首屏有内容可看，尾部慢源
+   * 不再拖住整个页面。
+   */
+  budgetMs?: number;
 }
 
-/** 取某源的分类表（带 6 小时缓存） */
+/**
+ * 正在进行的分类表请求。
+ *
+ * `probeCategories` 会为 8 个首页分类各调一次 `browseCategory`，8 次都会经过
+ * `categoriesOf`。缓存只在**响应回来之后**才写入，所以这 8 次并发调用会同时
+ * 命中「无缓存」分支，把同一个 `?ac=list` 打 8 遍——13 个源就是 104 个重复请求，
+ * 全部挤在并发闸门里，这正是「首页一进来就卡、分类浏览跟着变慢」的主因。
+ *
+ * 这里把「进行中的请求」也当成缓存：同一地址在途时后来者直接 await 同一个
+ * promise。失败时立刻删掉，下一次调用可以正常重试。
+ */
+const inflightCategories = new Map<string, Promise<SourceCategory[]>>();
+
+/** 取某源的分类表（带 6 小时缓存 + 在途去重） */
 async function categoriesOf(
   source: SourceConfig,
   http: HttpClient,
@@ -362,9 +385,21 @@ async function categoriesOf(
 ): Promise<SourceCategory[]> {
   const cached = getCachedCategories(source.url);
   if (cached) return cached;
-  const categories = await fetchSourceCategories(source, http, opts);
-  setCachedCategories(source.url, categories);
-  return categories;
+
+  const inflight = inflightCategories.get(source.url);
+  if (inflight) return inflight;
+
+  const promise = fetchSourceCategories(source, http, opts)
+    .then((categories) => {
+      setCachedCategories(source.url, categories);
+      return categories;
+    })
+    .finally(() => {
+      // 无论成败都要摘掉：成功时已有缓存接管，失败时留给下一次重试的机会
+      if (inflightCategories.get(source.url) === promise) inflightCategories.delete(source.url);
+    });
+  inflightCategories.set(source.url, promise);
+  return promise;
 }
 
 /**
@@ -394,7 +429,8 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
   if (cacheKey) {
     const hit = browseCache.get(cacheKey);
     // 返回副本：调用方（各页面）会原地 push/sort 自己那份数组，直接给缓存引用会被改坏。
-    if (hit && Date.now() - hit.at < BROWSE_TTL_MS) {
+    const ttl = hit?.partial ? BROWSE_PARTIAL_TTL_MS : BROWSE_TTL_MS;
+    if (hit && Date.now() - hit.at < ttl) {
       return { ...hit.result, items: [...hit.result.items], outcomes: [...hit.result.outcomes] };
     }
   }
@@ -452,8 +488,33 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
     }
   };
 
-  const uniqueCollected = await Promise.all(
-    uniqueSources.map(async (source): Promise<SourceCollected> => {
+  const budgetMs = Math.max(1_000, opts.budgetMs ?? DEFAULT_BROWSE_BUDGET_MS);
+  const startedAt = Date.now();
+
+  // 内层控制器：到预算点就把还挂着的请求取消掉。不取消的话它们会继续占着
+  // 并发闸门，用户紧接着点下一个分类时才发现「闸门里全是上一轮的僵尸请求」。
+  const inner = new AbortController();
+  const relayAbort = () => inner.abort();
+  if (opts.signal) {
+    if (opts.signal.aborted) inner.abort();
+    else opts.signal.addEventListener('abort', relayAbort, { once: true });
+  }
+  const signal = inner.signal;
+
+  /**
+   * 结果按「源对象身份」记账，而不是按下标：超时返回时下标可能残缺，
+   * 而 sourceKey 又可能被用户导入的源撞上（见上面的注释），对象身份是唯一安全的键。
+   */
+  const results = new Map<SourceConfig, SourceCollected>();
+  const record = (source: SourceConfig, entry: SourceCollected): SourceCollected => {
+    results.set(source, entry);
+    done.push(entry);
+    emitPartial();
+    return entry;
+  };
+
+  const work = Promise.all(
+    uniqueSources.map(async (source): Promise<void> => {
       const started = Date.now();
       const finish = (
         outcome: Omit<CategorySourceOutcome, 'ms' | 'sourceKey' | 'sourceName'>,
@@ -469,13 +530,11 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
       });
 
       try {
-        const categories = await categoriesOf(source, opts.http, { timeoutMs, signal: opts.signal });
+        const categories = await categoriesOf(source, opts.http, { timeoutMs, signal });
         const typeIds = matchTypeIds(categories, opts.key, typeLimit);
         if (typeIds.length === 0) {
-          const skipped = finish({ ok: true, supported: false, count: 0 });
-          done.push(skipped);
-          emitPartial();
-          return skipped;
+          record(source, finish({ ok: true, supported: false, count: 0 }));
+          return;
         }
 
         // 子分类并行抓取：父分类不聚合子分类，只抓父级会几乎空白
@@ -485,7 +544,7 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
             for (let page = startPage; page < startPage + pages; page++) {
               const result = await browseSourceCategory(source, typeId, page, opts.http, {
                 timeoutMs,
-                signal: opts.signal,
+                signal,
               });
               list.push(...result.items);
               if (page >= result.pageCount) break;
@@ -496,31 +555,62 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
 
         // 「伦理片」这类名字带「片」，会被归档到电影桶，因此必须在分类浏览里也做成人过滤
         const list = filterAdultResults(batches.flat(), filterAdult);
-        const collectedEntry = finish({ ok: true, supported: true, count: list.length }, list);
-        done.push(collectedEntry);
-        emitPartial();
-        return collectedEntry;
+        record(source, finish({ ok: true, supported: true, count: list.length }, list));
       } catch (err) {
+        // 已经超时返回之后才 reject 的那些源不必再记一笔（结果集已定），
+        // 但记下来也无害——record 是幂等的按源覆盖。
+        if (results.has(source)) return;
         const timedOut = err instanceof HttpError && err.status === 408;
-        const failed = finish({
-          ok: false,
-          supported: false,
-          count: 0,
-          error: err instanceof Error ? err.message : '失败',
-          timedOut,
-        });
-        done.push(failed);
-        emitPartial();
-        return failed;
+        record(
+          source,
+          finish({
+            ok: false,
+            supported: false,
+            count: 0,
+            error: err instanceof Error ? err.message : '失败',
+            timedOut,
+          })
+        );
       }
     })
   );
 
+  // 到点就放手：宁可少两个源的内容，也不让一次分类浏览卡到一分钟。
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), budgetMs);
+  });
+  const settled = await Promise.race([work.then(() => 'all' as const), deadline]);
+  if (timer) clearTimeout(timer);
+  const expired = settled === 'timeout';
+  if (expired) {
+    inner.abort();
+    // 让已经 reject 的几个 catch 先跑完，结果更贴近真实（失败原因比「未完成」有用）
+    await Promise.resolve();
+  }
+  opts.signal?.removeEventListener('abort', relayAbort);
+
   // `done` 是「完成顺序」，最终结果仍按源声明顺序排列，保证列表顺序稳定。
   // 用下标而不是 sourceKey 回查：sourceKey 理论上唯一，但用户导入的源可能撞 key，
   // 一旦撞上按 key 回查就会把多个源折叠成一条，丢内容且很难查。
-  const collected = [
-    ...uniqueSources.map((_, index) => uniqueCollected[index]).filter((e): e is SourceCollected => !!e),
+  const collected: SourceCollected[] = [
+    ...uniqueSources.map((source): SourceCollected => {
+      const hit = results.get(source);
+      if (hit) return hit;
+      return {
+        outcome: {
+          sourceKey: source.key,
+          sourceName: source.name,
+          ok: false,
+          supported: false,
+          count: 0,
+          error: `超出 ${Math.round(budgetMs / 1000)} 秒总时限，已跳过`,
+          timedOut: true,
+          ms: Date.now() - startedAt,
+        },
+        items: [],
+      };
+    }),
     ...duplicated,
   ];
   const outcomes = collected.map((entry) => entry.outcome);
@@ -556,16 +646,28 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
   // 它们的 outcome.ok 恒为 true（「跳过」不是失败），一旦把它们算进 answered，
   // 只要用户配了重复地址，上面那条「一条源都没成功就不缓存」就永远失效——
   // 全源失败的空列表照样被缓存 5 分钟。
-  const answered = uniqueCollected.some((outcome) => outcome.outcome.ok);
+  //
+  // 被预算砍掉的那一轮（expired）仍然写缓存，但标记 partial 并只留
+  // BROWSE_PARTIAL_TTL_MS：否则只要有一个源每次都超时，缓存就永远写不进去，
+  // 用户每切一次分类都要重付一次 15 秒。短 TTL 让「立刻切回来」是快的，
+  // 过一会儿又会去尝试补齐。
+  const answered = uniqueSources.some((source) => results.get(source)?.outcome.ok === true);
   if (cacheKey && answered && !opts.signal?.aborted) {
-    browseCache.set(cacheKey, { at: Date.now(), result });
+    browseCache.set(cacheKey, { at: Date.now(), result, partial: expired });
   }
   return result;
 }
 
+/** 分类浏览的默认墙钟预算：15 秒内必须给用户一屏内容 */
+const DEFAULT_BROWSE_BUDGET_MS = 15_000;
 /** 分类浏览结果缓存（5 分钟）：切回上一个分类应当立刻出内容 */
 const BROWSE_TTL_MS = 5 * 60 * 1000;
-const browseCache = new Map<string, { at: number; result: CategoryBrowseResult }>();
+/** 被预算截断的结果只留 90 秒：够用户来回切两次，又不至于把残缺列表钉住 */
+const BROWSE_PARTIAL_TTL_MS = 90 * 1000;
+const browseCache = new Map<
+  string,
+  { at: number; result: CategoryBrowseResult; partial?: boolean }
+>();
 
 /** 清空分类结果缓存（源变更、手动刷新时调用） */
 export function clearBrowseCache(): void {
@@ -597,6 +699,18 @@ export interface ProbeCategoriesOptions {
   signal?: AbortSignal;
   /** 每个分类探测完成时回调（UI 可以边探测边点亮按钮） */
   onProbe?: (result: CategoryAvailability) => void;
+  /**
+   * 快速模式：只看分类表，不抓内容。
+   *
+   * 常规模式会为 8 个分类各跑一次 `browseCategory`，也就是 8 × 源数 次内容请求。
+   * 实测 13 个源下整轮要 104 秒——而首页并没有在等结论，它只是想让「少儿」这类
+   * 空入口不要出现。快速模式把「源站分类表里有没有这个桶」当作可用性依据，
+   * 只发 13 次 `?ac=list`（还有 6 小时缓存与在途去重），一秒级完成。
+   *
+   * 代价：源站声明了分类但内容为空时会高估。这种分类点进去至少不是「全空」，
+   * 各源会各自返回空列表，比首页挂 104 秒好得多。
+   */
+  fast?: boolean;
 }
 
 /**
@@ -610,9 +724,11 @@ export async function probeCategories(opts: ProbeCategoriesOptions): Promise<Cat
   const keys = opts.keys ?? HOME_CATEGORY_ORDER;
   const filterAdult = opts.filterAdult ?? true;
   const typeLimit = opts.typeLimit ?? 1;
+  const fast = opts.fast === true;
 
   // 结果缓存：首页反复挂载时不必每次重打 32 个请求。键里带上源地址、分类集合与过滤开关。
-  const cacheKey = `${keys.join(',')}|${filterAdult ? 1 : 0}|${typeLimit}|${opts.sources
+  // fast 也要进键：两种模式的口径不同（表 vs 内容），混用会让「高估」的结论泄漏到精确模式。
+  const cacheKey = `${keys.join(',')}|${filterAdult ? 1 : 0}|${typeLimit}|${fast ? 'f' : 'c'}|${opts.sources
     .map((source) => source.url)
     .sort()
     .join(',')}`;
@@ -624,7 +740,42 @@ export async function probeCategories(opts: ProbeCategoriesOptions): Promise<Cat
   // 而这 10 分钟里首页会一直显示「所选源暂未返回任何分类内容」。
   let meaningful = false;
 
-  const results = await Promise.all(
+  /** 快速模式：13 次分类表请求决定 8 个入口的显隐 */
+  const probeFast = async (): Promise<CategoryAvailability[]> => {
+    const timeoutMs = opts.timeoutMs ?? 10_000;
+    const tables = await Promise.all(
+      opts.sources.map(async (source): Promise<SourceCategory[] | null> => {
+        try {
+          return await categoriesOf(source, opts.http, { timeoutMs, signal: opts.signal });
+        } catch {
+          return null;
+        }
+      })
+    );
+    if (tables.some((table) => table !== null)) meaningful = true;
+    return keys.map((key): CategoryAvailability => {
+      let hits = 0;
+      for (const table of tables) {
+        if (table && matchTypeIds(table, key, 1).length > 0) hits += 1;
+      }
+      const availability: CategoryAvailability = {
+        key,
+        available: hits > 0,
+        sources: opts.sources.length,
+        hits,
+      };
+      try {
+        opts.onProbe?.(availability);
+      } catch {
+        /* 回调异常不影响整体 */
+      }
+      return availability;
+    });
+  };
+
+  const results = fast
+    ? await probeFast()
+    : await Promise.all(
     keys.map(async (key): Promise<CategoryAvailability> => {
       try {
         const result = await browseCategory({
@@ -669,7 +820,7 @@ export async function probeCategories(opts: ProbeCategoriesOptions): Promise<Cat
         return availability;
       }
     })
-  );
+      );
   // 被取消的探测不写缓存，避免把「全空」结论固化下来
   if (!opts.signal?.aborted && meaningful) {
     // 存一份快照，返回另一份副本：调用方（首页一边探测一边点亮入口）会原地改自己那份，

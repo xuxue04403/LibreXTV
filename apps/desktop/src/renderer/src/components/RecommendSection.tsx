@@ -11,6 +11,7 @@ import {
 } from '@librextv/core';
 import { fetchRecommend, type RecommendQuery } from '../lib/bridge';
 import { useAppStore } from '../lib/store';
+import { HScrollRow } from './HScrollRow';
 import { Poster } from './Poster';
 
 /**
@@ -193,7 +194,7 @@ export function RecommendSection({
           <div style={{ fontSize: 12.5 }}>这个分类暂时没有推荐内容。</div>
         </div>
       ) : (
-        <div className="grid">
+        <HScrollRow>
           {shown.map((item) => (
             <button
               key={`${item.source}:${item.id}`}
@@ -215,7 +216,7 @@ export function RecommendSection({
               </div>
             </button>
           ))}
-        </div>
+        </HScrollRow>
       )}
     </>
   );

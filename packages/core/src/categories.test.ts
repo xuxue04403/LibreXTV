@@ -637,3 +637,147 @@ describe('probeCategories（首页隐藏空分类）', () => {
     expect(third[0].hits).not.toBe(777);
   });
 });
+
+describe('probeCategories 快速模式（只看分类表）', () => {
+  it('只请求 ac=list，不抓内容，可用性按分类表判定', async () => {
+    clearCategoryCache();
+    clearProbeCache();
+    const calls: string[] = [];
+    const http: HttpClient = {
+      async request(url) {
+        calls.push(url);
+        if (url.includes('ac=list')) return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        return res({ pagecount: 1, list: [{ vod_id: 1, vod_name: 'x', type_name: '电影' }] });
+      },
+    };
+    const results = await probeCategories({
+      sources: [source],
+      http,
+      keys: ['movie', 'kids'],
+      fast: true,
+    });
+    // 常规模式要 2 × 2 个请求（每个分类一次表 + 一次内容），快速模式只要 1 次表
+    expect(calls.filter((url) => url.includes('ac=list'))).toHaveLength(1);
+    expect(calls.some((url) => url.includes('ac=videolist'))).toBe(false);
+    expect(results.map((r) => [r.key, r.available])).toEqual([
+      ['movie', true],
+      ['kids', false],
+    ]);
+  });
+
+  it('快速模式与常规模式的缓存互不串用', async () => {
+    clearCategoryCache();
+    clearProbeCache();
+    // 分类表里有「少儿」，但该分类一条内容都没有：常规模式判不可用，快速模式判可用
+    const http: HttpClient = {
+      async request(url) {
+        if (url.includes('ac=list')) {
+          return res({
+            class: [
+              { type_id: 1, type_name: '电影' },
+              { type_id: 5, type_name: '少儿' },
+            ],
+          });
+        }
+        const typeId = /[?&]t=(\d+)/.exec(url)?.[1] ?? '';
+        const list = typeId === '1' ? [{ vod_id: 1, vod_name: 'x', type_name: '电影' }] : [];
+        return res({ pagecount: 1, list });
+      },
+    };
+    const slow = await probeCategories({ sources: [source], http, keys: ['kids'] });
+    const fast = await probeCategories({ sources: [source], http, keys: ['kids'], fast: true });
+    expect(slow[0].available).toBe(false);
+    expect(fast[0].available).toBe(true);
+  });
+});
+
+describe('分类表在途去重', () => {
+  it('并发浏览两个分类时，同一个源的 ac=list 只请求一次', async () => {
+    clearCategoryCache();
+    let listCalls = 0;
+    const http: HttpClient = {
+      async request(url) {
+        if (url.includes('ac=list')) {
+          listCalls += 1;
+          // 让请求「悬一会儿」：两个 browseCategory 必须真的并发经过 categoriesOf
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return res({
+            class: [
+              { type_id: 1, type_name: '电影' },
+              { type_id: 2, type_name: '连续剧' },
+            ],
+          });
+        }
+        return res({ pagecount: 1, list: [] });
+      },
+    };
+    await Promise.all([
+      browseCategory({ sources: [source], key: 'movie', http }),
+      browseCategory({ sources: [source], key: 'tv', http }),
+    ]);
+    expect(listCalls).toBe(1);
+  });
+
+  it('请求失败后不残留，下一次调用会重新尝试', async () => {
+    clearCategoryCache();
+    let attempts = 0;
+    const http: HttpClient = {
+      async request(url) {
+        if (url.includes('ac=list')) {
+          attempts += 1;
+          if (attempts === 1) throw new Error('临时故障');
+          return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        }
+        return res({ pagecount: 1, list: [] });
+      },
+    };
+    const first = await browseCategory({ sources: [source], key: 'movie', http });
+    expect(first.outcomes[0].ok).toBe(false);
+    const second = await browseCategory({ sources: [source], key: 'movie', http });
+    expect(second.outcomes[0].ok).toBe(true);
+  });
+});
+
+describe('browseCategory 的总时限', () => {
+  it('慢源不再拖住整页：到点先返回已收到的内容，其余标超时', async () => {
+    clearCategoryCache();
+    const slow: SourceConfig = { key: 'slow', name: '慢源', url: 'https://slow.example.com/api.php/provide/vod' };
+    const http: HttpClient = {
+      async request(url, options) {
+        if (url.includes('/slow.example.com')) {
+          // 一直不答复，只有被取消时才结束
+          return new Promise<HttpResponse>((_, reject) => {
+            options?.signal?.addEventListener('abort', () => reject(new Error('已取消')), { once: true });
+          });
+        }
+        if (url.includes('ac=list')) return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        return res({ pagecount: 1, list: [{ vod_id: 11, vod_name: '流浪地球', type_name: '电影' }] });
+      },
+    };
+    const started = Date.now();
+    const result = await browseCategory({
+      sources: [source, slow],
+      key: 'movie',
+      http,
+      budgetMs: 300,
+    });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(result.items.map((i) => i.vodId)).toEqual(['11']);
+    const slowOutcome = result.outcomes.find((o) => o.sourceKey === 'slow');
+    expect(slowOutcome).toMatchObject({ ok: false, timedOut: true });
+  });
+
+  it('所有源都在预算内答复时不触发超时，结果与常规一致', async () => {
+    clearCategoryCache();
+    const http: HttpClient = {
+      async request(url) {
+        if (url.includes('ac=list')) return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        return res({ pagecount: 1, list: [{ vod_id: 11, vod_name: '流浪地球', type_name: '电影' }] });
+      },
+    };
+    const result = await browseCategory({ sources: [source], key: 'movie', http, budgetMs: 5_000 });
+    expect(result.items).toHaveLength(1);
+    expect(result.outcomes[0].timedOut).toBeFalsy();
+    expect(result.outcomes[0].ok).toBe(true);
+  });
+});

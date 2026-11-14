@@ -12,6 +12,7 @@ import { cachedItems, rememberItems } from '../lib/catalog-cache';
 import { useAppStore } from '../lib/store';
 import { useAvailableCategories } from '../lib/category-availability';
 import { DetailPanel } from '../components/DetailPanel';
+import { HScrollRow } from '../components/HScrollRow';
 import { Icon } from '../components/Icons';
 import { Poster } from '../components/Poster';
 import { useToast } from '../components/toast-context';
@@ -368,14 +369,14 @@ export function CategoryButtons({ onSelect }: { onSelect: (key: CategoryKey) => 
   if (available === undefined) {
     // 探测中先摆全部（避免布局跳动），完成后收敛到有内容的那些
     return (
-      <div className="category-bar">
+      <HScrollRow fixedItemWidth={false}>
         {HOME_CATEGORIES.map((bucket) => (
           <button key={bucket.key} className="category-btn" onClick={() => onSelect(bucket.key)}>
             <span className="category-dot" />
             {bucket.label}
           </button>
         ))}
-      </div>
+      </HScrollRow>
     );
   }
 
@@ -389,13 +390,13 @@ export function CategoryButtons({ onSelect }: { onSelect: (key: CategoryKey) => 
   }
 
   return (
-    <div className="category-bar">
+    <HScrollRow fixedItemWidth={false}>
       {shown.map((bucket) => (
         <button key={bucket.key} className="category-btn" onClick={() => onSelect(bucket.key)}>
           <span className="category-dot" />
           {bucket.label}
         </button>
       ))}
-    </div>
+    </HScrollRow>
   );
 }

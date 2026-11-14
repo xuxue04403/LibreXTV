@@ -1,6 +1,6 @@
 {
   "name": "@librextv/desktop",
-  "version": "1.3.10",
+  "version": "1.3.11",
   "private": true,
   "description": "LibreXTV 桌面端（Electron）",
   "author": "LibreXTV Client Contributors",

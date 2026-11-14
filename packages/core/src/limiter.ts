@@ -52,10 +52,17 @@ export function createLimiter(concurrency: number): Limiter {
 /**
  * 分类浏览 / 分类表用的共享闸门。
  *
- * 定在 6：单源自己最多同时开 2~3 个请求（子分类并行），两三个源一起跑刚好，
- * 再高就容易触发上游限流。
+ * 定在 12：这个值是「所有源合起来」的上限，单源自己还有 `sourceLimiter(3)`
+ * 兜底，所以放宽它不会让某一个站被打爆——真正会被打爆的维度是「单源并发」，
+ * 而那个维度已经单独管住了。
+ *
+ * 原来定在 6，是按「4 个源 × 3 个子分类」估的；内置源涨到 13 个之后，
+ * 13 个源的分类表在 6 个槽位里排 3 轮，慢源（单源 10 秒超时）一占就是两轮，
+ * 实测「电影」分类首次浏览 44.6 秒、首页 8 分类探测 104 秒，主要就是排队等出来的。
+ * 放宽到 12 之后同样的请求量只需一半轮次。
  */
-export const catalogLimiter = createLimiter(6);
+export const CATALOG_LIMITER_CONCURRENCY = 12;
+export const catalogLimiter = createLimiter(CATALOG_LIMITER_CONCURRENCY);
 
 const sourceLimiters = new Map<string, Limiter>();
 

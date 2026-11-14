@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { browseCategory, clearCategoryCache } from './categories';
-import { createLimiter } from './limiter';
+import { CATALOG_LIMITER_CONCURRENCY, createLimiter } from './limiter';
 import type { HttpClient, HttpRequestOptions, HttpResponse } from './http';
 import type { SourceConfig } from './types';
+
+/** 全局分类闸门的并发上限：断言跟着常量走，改配置不用回来改测试 */
+const CATALOG_CONCURRENCY = CATALOG_LIMITER_CONCURRENCY;
 
 function response(text: string, ok = true, status = 200): HttpResponse {
   return {
@@ -111,7 +114,7 @@ describe('browseCategory 的并发闸门', () => {
     expect(result.items.length).toBeGreaterThan(0);
     // 4 个源 × （1 次分类表 + 1 个子分类）= 8 个请求，但任一时刻不超过闸门上限
     expect(stats.total).toBeGreaterThanOrEqual(8);
-    expect(stats.peak).toBeLessThanOrEqual(6);
+    expect(stats.peak).toBeLessThanOrEqual(CATALOG_CONCURRENCY);
   });
 
   it('同一地址被配了多条时只打一次上游', async () => {

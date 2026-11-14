@@ -10,6 +10,7 @@ import {
 import { http } from '../lib/bridge';
 import { useAppStore } from '../lib/store';
 import { Poster } from '../components/Poster';
+import { HScrollRow } from '../components/HScrollRow';
 import { RecommendSection } from '../components/RecommendSection';
 import { useToast } from '../components/toast-context';
 import { CategoryButtons, type CategoryKey } from './Category';
@@ -187,7 +188,7 @@ export function HomePage({
           <div style={{ fontSize: 12.5 }}>还没有观看记录。搜索影片并播放后，这里会出现续播入口。</div>
         </div>
       ) : (
-        <div className="grid">
+        <HScrollRow>
           {history.slice(0, 12).map((raw) => {
             const h = normalizeHistoryEntry(raw);
             const progress = h.duration > 0 ? Math.min(100, (h.position / h.duration) * 100) : 0;
@@ -223,7 +224,7 @@ export function HomePage({
               </button>
             );
           })}
-        </div>
+        </HScrollRow>
       )}
 
       {/* 有续播记录时推荐位放在「继续观看」之后：先看自己的进度，再看发现 */}
@@ -241,7 +242,7 @@ export function HomePage({
           <div style={{ fontSize: 12.5 }}>在影片详情里点击「收藏」，方便下次直接打开。</div>
         </div>
       ) : (
-        <div className="grid">
+        <HScrollRow>
           {favorites.slice(0, 18).map((f) => {
             const busy = opening.has(f.id);
             return (
@@ -268,7 +269,7 @@ export function HomePage({
               </button>
             );
           })}
-        </div>
+        </HScrollRow>
       )}
     </>
   );

@@ -6,8 +6,8 @@ import { useAppStore } from './store';
 /**
  * 分类可用性探测（首页与分类页共用）。
  *
- * 探测要打 8 个分类 × 每个源，首次约 8 秒。为了不让首页按钮先全显示再少一个，
- * 结果按「源签名」落到 localStorage：下次启动直接按上次结论渲染，后台再刷新。
+ * 探测走「只看分类表」的快速模式，13 个源约一秒级完成；结果按「源签名」落到
+ * localStorage：下次启动直接按上次结论渲染，后台再刷新，首屏不等它。
  *
  * 这个文件只导出 hook 与类型（React Fast Refresh 要求组件文件里不放别的导出，
  * 否则改一次样式就要整文件重载，正在播放的视频会被打断）。
@@ -50,13 +50,18 @@ function writeCachedAvailability(signature: string, keys: CategoryKey[]): void {
 /**
  * 分类探测的模块级单飞。
  *
- * 探测一轮要打 8 个分类 × N 个源，冷启动约 8 秒。旧实现在 effect 的 cleanup 里
- * `controller.abort()`：用户只要在 8 秒内切一次页（首页→搜索→首页很常见），
- * 这一轮就被打断、结果也没落盘，回来后从头再问一遍——反复切页时探测永远收敛不了，
- * 网络请求翻好几倍。
+ * 探测一轮曾经要打「8 个分类 × N 个源」次内容请求，13 个源下实测 104 秒；
+ * 这段时间里它和用户主动点开的分类页抢同一个全局并发闸门，所以首页一挂载，
+ * 分类浏览就跟着变慢。
  *
- * 改成：探测结果与「进行中的那一轮」都挂在模块上，按签名复用；
- * 组件卸载只取消「把结果写回 state」，不再打断请求本身。
+ * 现在改两件事：
+ * 1. 走 `fast` 模式：只看各源的分类表（带 6 小时缓存 + 在途去重），13 次请求就够，
+ *    一秒级完成，不再发内容请求。
+ * 2. 结果照旧按签名落到 localStorage，下次启动先按上次结论渲染。
+ *
+ * 模块级单飞的意义（保留）：探测结果与「进行中的那一轮」都挂在模块上，按签名复用；
+ * 组件卸载只取消「把结果写回 state」，不打断请求本身——用户在探测期间切页再切回来
+ * 不会从头再问一遍。
  */
 let probeOnce: { signature: string; promise: Promise<CategoryKey[]> } | null = null;
 let probedResult: { signature: string; keys: CategoryKey[] } | null = null;
@@ -68,13 +73,22 @@ function ensureProbe(
 ): Promise<CategoryKey[]> {
   if (probedResult?.signature === signature) return Promise.resolve(probedResult.keys);
   if (probeOnce?.signature === signature) return probeOnce.promise;
-  const promise = probeCategories({ sources, http, filterAdult: adultFilter, timeoutMs: 12_000 })
+  const promise = probeCategories({
+    sources,
+    http,
+    filterAdult: adultFilter,
+    timeoutMs: 12_000,
+    fast: true,
+  })
     .then((results) => results.filter((r) => r.available).map((r) => r.key))
-    .catch(() => HOME_CATEGORIES.map((c) => c.key))
-    .then((keys) => {
+    .catch(() => [] as CategoryKey[])
+    .then((available) => {
+      // 一个分类都判定不出来（全部源超时、断网、刚开机）时不能把 8 个入口全藏掉：
+      // 用户连点进去试一次的机会都没有。退回全量展示，且不落盘——下次进来重新探。
+      const keys = available.length > 0 ? available : HOME_CATEGORIES.map((c) => c.key);
       probedResult = { signature, keys };
       if (probeOnce?.signature === signature) probeOnce = null;
-      writeCachedAvailability(signature, keys);
+      if (available.length > 0) writeCachedAvailability(signature, available);
       return keys;
     });
   probeOnce = { signature, promise };

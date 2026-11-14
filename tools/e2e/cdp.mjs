@@ -139,6 +139,9 @@ if (entry && import.meta.url === entry) {
   try {
     if (op === 'eval') {
       console.log(JSON.stringify(await evaluate(session, rest.join(' ')), null, 2));
+    } else if (op === 'evala') {
+      // 允许 await：量「点进去到第一张卡片出现」这种时序，只能在页面里等
+      console.log(JSON.stringify(await evaluateAsync(session, rest.join(' ')), null, 2));
     } else if (op === 'click') {
       console.log(JSON.stringify(await click(session, rest.join(' ')), null, 2));
     } else if (op === 'shot') {
