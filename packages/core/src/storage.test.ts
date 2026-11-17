@@ -64,6 +64,30 @@ describe('parseSubscription', () => {
     expect(parsed.sources).toHaveLength(1);
   });
 
+  it('两份裸数组订阅的源 key 不会撞在一起', () => {
+    // 撞 key 的后果：两个订阅的源在启用状态里只能一起勾选，
+    // 健康度/画质探测按 key 记账会互相覆盖，历史回查也会指到另一个订阅的源上。
+    const a = normalizeSubscription(
+      [{ name: 'A0', url: 'https://a/api.php/provide/vod' }],
+      'https://a/list.json',
+    );
+    const b = normalizeSubscription(
+      [{ name: 'B0', url: 'https://b/api.php/provide/vod' }],
+      'https://b/list.json',
+    );
+    expect(a.sources[0].key).not.toBe(b.sources[0].key);
+    // 同一个订阅内部仍然从 0 开始编，保持稳定
+    expect(a.sources[0].key).toMatch(/^sub_.+_0$/);
+    expect(b.sources[0].key).toMatch(/^sub_.+_0$/);
+  });
+
+  it('同一个地址的裸数组订阅 key 稳定', () => {
+    const list = [{ name: 'A0', url: 'https://a/api.php/provide/vod' }];
+    const first = normalizeSubscription(list, 'https://a/list.json');
+    const second = normalizeSubscription(list, 'https://a/list.json');
+    expect(first.sources[0].key).toBe(second.sources[0].key);
+  });
+
   it('按 URL 去重并剔除非法地址', () => {
     const parsed = normalizeSubscription({
       sources: [

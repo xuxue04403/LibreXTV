@@ -8,7 +8,13 @@
 
 import type { SearchResultItem, VideoDetail } from './types';
 
-const M3U8_PATTERN = /\$https?:\/\/[^"'\s]+?\.m3u8/g;
+/**
+ * 简介文本里的 m3u8 链接。
+ *
+ * 必须把 `?query` 一起吃掉：CDN 防盗链普遍是 `xxx.m3u8?token=…&expires=…`，
+ * 惰性匹配停在第一个 `.m3u8` 会丢掉签名参数，播放器拿到的是 403 的裸地址。
+ */
+const M3U8_PATTERN = /\$?https?:\/\/[^"'\s]*?\.m3u8(?:\?[^"'\s#]*)?/g;
 
 /** 采集站大多校验 UA，客户端直连时也要带上 */
 export const CMS_USER_AGENT =
@@ -16,6 +22,22 @@ export const CMS_USER_AGENT =
 
 export function cmsRequestHeaders(): Record<string, string> {
   return { 'User-Agent': CMS_USER_AGENT, Accept: 'application/json' };
+}
+
+/**
+ * 在源地址上追加 Apple CMS 查询参数。
+ *
+ * 自定义源的地址可能自带查询串（`…/api.php?key=abc`），无脑拼 `?ac=…` 会得到
+ * `…?key=abc?ac=videolist&wd=…`——第二个 `?` 变成上一个参数值的一部分，`wd` 根本不生效，
+ * 搜索恒 0 条。所以按需选 `?` 还是 `&`。
+ */
+export function cmsUrl(base: string, params: Record<string, string | number>): string {
+  const root = base.trim().replace(/\/+$/, '');
+  const sep = root.includes('?') ? '&' : '?';
+  const query = Object.entries(params)
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+    .join('&');
+  return `${root}${sep}${query}`;
 }
 
 /** 搜索响应 → 统一结果列表 */
@@ -60,8 +82,11 @@ export function extractEpisodesFromPlayUrl(playUrl: string): string[] {
       group
         .split('#')
         .map((ep) => {
-          const parts = ep.split('$');
-          return parts.length > 1 ? parts[1] : '';
+          // 只按**第一个** `$` 切：URL 自身可能带 `$`（部分 CDN 签名就用它），
+          // 用 `split('$')` 取 parts[1] 会把后半截截掉，得到一个不能播的地址。
+          const at = ep.indexOf('$');
+          const url = at >= 0 ? ep.slice(at + 1) : ep;
+          return url.trim();
         })
         .filter((url) => url.startsWith('http://') || url.startsWith('https://'))
     )
@@ -120,10 +145,11 @@ export function parseDetailPageHtml(
   html: string,
   source: { key: string; name: string; url: string }
 ): VideoDetail {
-  // 先尝试通用模式，再尝试非凡影视的日期哈希特征路径
-  let matches = html.match(/\$(https?:\/\/[^"'\s]+?\.m3u8)/g) || [];
+  // 先尝试通用模式，再尝试非凡影视的日期哈希特征路径。
+  // `.m3u8` 后面要接着吃 `?query`：CDN 签名参数（token/expires）丢了就是 403。
+  let matches = html.match(/\$https?:\/\/[^"'\s<]*?\.m3u8(?:\?[^"'\s<]*)?/g) || [];
   if (matches.length === 0) {
-    matches = html.match(/\$(https?:\/\/[^"'\s]+?\/\d{8}\/\d+_[a-f0-9]+\/index\.m3u8)/g) || [];
+    matches = html.match(/\$https?:\/\/[^"'\s<]+?\/\d{8}\/\d+_[a-f0-9]+\/index\.m3u8(?:\?[^"'\s<]*)?/g) || [];
   }
   // 去重并清理尾缀
   const episodes = [...new Set(matches)].map((link) => {
@@ -349,4 +375,83 @@ export function filterRelevantResults<T extends { name?: string }>(items: T[], w
   const query = prepareQuery(wd);
   if (!query) return items;
   return items.filter((item) => isRelevantPrepared(item.name || '', query));
+}
+
+/**
+ * 季数解析（供同片判定用）。
+ *
+ * 收窄了两处，避免把数字片名当季数：
+ * - 基底是纯数字（「1917」被拆成「19」的第 17 季）时返回 undefined；
+ * - 两侧都放宽到「数字前无空格」，让「庆余年2」与「庆余年 第二季」能对上。
+ */
+function sameShowSeason(raw: string, annotations: boolean): { base: string; season: number } | undefined {
+  const parsed = parseSeasonSuffix(raw, annotations, false);
+  if (!parsed) return undefined;
+  if (/^\d+$/u.test(normalizeTitle(parsed.base))) return undefined;
+  return { base: parsed.base, season: parsed.season };
+}
+
+/**
+ * 归一化串里 needle 是否紧跟「续集序号」。
+ *
+ * 只认一位数字（1-9）且后面不是 k/p：「流浪地球2」是续集，
+ * 「流浪地球 4K」「流浪地球 1080P」只是画质说明，后者不能当续集挡掉。
+ */
+function digitsDirectlyAfter(haystack: string, needle: string): boolean {
+  if (!needle) return false;
+  let index = haystack.indexOf(needle);
+  while (index >= 0) {
+    const rest = haystack.slice(index + needle.length);
+    const run = /^(\d+)/u.exec(rest);
+    if (run) {
+      const digits = run[1];
+      const after = rest.slice(digits.length, digits.length + 1).toLowerCase();
+      if (digits.length === 1 && digits !== '0' && after !== 'k' && after !== 'p') return true;
+    }
+    index = haystack.indexOf(needle, index + 1);
+  }
+  return false;
+}
+
+/**
+ * 去掉括号注释与年份，只留下「片名本体」。
+ *
+ * 「繁花(2024) 全集」去掉注释后是「繁花 全集」，紧跟的数字没了，
+ * 才不会被紧邻数字规则误判成「繁花2」这类续集。
+ */
+function stripAnnotations(raw: string): string {
+  return raw
+    .replace(/[([【][^)\]】]*[)\]】]/gu, ' ')
+    .replace(/(^|[\s\p{P}])(?:19|20)\d{2}(?=$|[\s\p{P}])/gu, ' ');
+}
+
+/**
+ * 判断两个片名是否「同一部片」，用于自动换源的同片匹配。
+ *
+ * 比 `isRelevant`（搜索相关性）严格：用户搜「庆余年」时返回「庆余年2」是合理的，
+ * 但自动换源把它当成同一部片就会静默播错内容（界面标题不变，看的却是续集）。
+ * 这里要求季数一致，且基底互相包含——「流浪地球2」相对「流浪地球」按季数或
+ * 紧邻数字都能挡住。
+ */
+export function isSameShow(name: string, wd: string): boolean {
+  const title = normalizeTitle(name);
+  const wanted = normalizeTitle(wd);
+  if (!title || !wanted) return false;
+  if (title === wanted) return true;
+
+  const titleSeason = sameShowSeason(name, true);
+  const querySeason = sameShowSeason(wd, false);
+  const titleNo = titleSeason?.season ?? 1;
+  const queryNo = querySeason?.season ?? 1;
+  if (titleNo !== queryNo) return false;
+
+  const titleBase = normalizeTitle(titleSeason?.base ?? name);
+  const queryBase = normalizeTitle(querySeason?.base ?? wd);
+  if (!titleBase || !queryBase) return false;
+  if (titleBase === queryBase) return true;
+  // 紧邻数字只在「去掉括号注释与年份」之后判断：否则「繁花(2024)」会被当成「繁花2」
+  const titleDigits = normalizeTitle(stripAnnotations(name));
+  const queryDigits = normalizeTitle(stripAnnotations(wd));
+  if (digitsDirectlyAfter(titleDigits, queryDigits) || digitsDirectlyAfter(queryDigits, titleDigits)) return false;
+  return titleBase.includes(queryBase) || queryBase.includes(titleBase);
 }

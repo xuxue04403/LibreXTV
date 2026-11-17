@@ -7,17 +7,22 @@
  */
 import { media } from '@kit.MediaKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { appModel } from '../model/AppModel';
+import { appModel, ProgressTarget } from '../model/AppModel';
 import { PlaybackCandidate, VodSource } from '../model/Types';
 import { Palette, PillButton, SectionTitle, HintLine } from '../view/Common';
 
 const SEEK_STEP_MS = 10_000;
 const STALL_LIMIT_SEC = 20;
+/** 单个候选源的详情探测死线：串行试 7 个源时不能一个卡死就拖住整轮 */
+const FAILOVER_TIMEOUT_MS = 8_000;
+/** 进度落盘间隔（墙钟，不是「秒数是 5 的倍数」） */
+const SAVE_INTERVAL_MS = 5_000;
 
 @Component
 export struct PlayerPage {
   @StorageLink('vmVersion') vmVersion: number = 0;
   @State private title: string = '';
+  @State private cover: string = '';
   @State private episodes: string[] = [];
   @State private index: number = 0;
   @State private playing: boolean = false;
@@ -44,6 +49,21 @@ export struct PlayerPage {
   private currentSource: VodSource | null = null;
   private currentVodId: string = '';
   private resumedOnce: boolean = false;
+  /** 打开序号：换集/换源时旧的那次 openCurrent 可能还没建完播放器 */
+  private openSeq: number = 0;
+  private lastSaveAt: number = 0;
+
+  /** 落进度用的「当前播放对象」：换源后必须跟着换，不能沿用 playerTarget */
+  private progressTarget(): ProgressTarget {
+    return new ProgressTarget(
+      this.currentSource === null ? '' : this.currentSource.key,
+      this.currentVodId,
+      this.title,
+      this.cover,
+      this.sourceName,
+      this.episodes.length
+    );
+  }
 
   aboutToAppear(): void {
     const t = appModel.playerTarget;
@@ -52,6 +72,7 @@ export struct PlayerPage {
       return;
     }
     this.title = t.title;
+    this.cover = t.cover;
     this.episodes = t.episodes;
     this.index = t.startIndex;
     this.sourceName = t.sourceName;
@@ -68,7 +89,7 @@ export struct PlayerPage {
       clearTimeout(this.noteTimer);
     }
     if (!this.ended) {
-      appModel.saveProgress(this.index, this.positionMs, this.durationMs, false);
+      appModel.saveProgress(this.index, this.positionMs, this.durationMs, false, this.progressTarget());
     }
     this.release();
   }
@@ -89,6 +110,7 @@ export struct PlayerPage {
         p.off('stateChange');
         p.off('timeUpdate');
         p.off('error');
+        p.off('bufferingUpdate');
         await p.release();
       } catch (err) {
         // 释放失败不影响退出
@@ -103,27 +125,62 @@ export struct PlayerPage {
       this.errorText = '这一集没有播放地址';
       return;
     }
+    // 代际守卫：连点选集/连续换源时，前一次 createAVPlayer 可能在这之后才完成，
+    // 直接赋值会把新播放器覆盖成旧的（画面永久黑屏，事件也只挂在旧实例上）。
+    const mySeq = ++this.openSeq;
     this.errorText = '';
     this.buffering = true;
     this.stalledSec = 0;
+    this.lastSaveAt = 0;
     await this.release();
     try {
       const p = await media.createAVPlayer();
+      if (mySeq !== this.openSeq) {
+        await p.release();
+        return;
+      }
       this.player = p;
+      // 每个回调都先确认「自己还是当前播放器」：被换掉之后旧实例的事件必须丢弃
       p.on('error', (err: BusinessError) => {
+        if (this.player !== p) {
+          return;
+        }
         this.buffering = false;
         this.errorText = `播放失败：${err.message}`;
         this.tryFailover('播放失败');
       });
       p.on('stateChange', (state: string) => {
+        if (this.player !== p) {
+          return;
+        }
         this.onState(state);
       });
       p.on('timeUpdate', (time: number) => {
+        if (this.player !== p) {
+          return;
+        }
         this.positionMs = time;
+      });
+      // 缓冲状态必须靠这个事件：起播时的 `buffering = true` 只有它才能关掉，
+      // 否则第一集之后 `buffering` 一直是 false（`openCurrent` 里又置 true 后没人复位），
+      // 看门狗既不数卡死，UI 也会一直转圈或者永远不转。
+      p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
+        if (this.player !== p) {
+          return;
+        }
+        if (infoType === media.BufferingInfoType.BUFFERING_START) {
+          this.buffering = true;
+        } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
+          this.buffering = false;
+          this.stalledSec = 0;
+        }
       });
       // 先设 url（idle → initialized），surfaceId 在 initialized 后设
       p.url = url;
     } catch (err) {
+      if (mySeq !== this.openSeq) {
+        return;
+      }
       this.buffering = false;
       this.errorText = `播放器初始化失败：${(err as BusinessError).message}`;
     }
@@ -196,7 +253,10 @@ export struct PlayerPage {
         return;
       }
       this.durationMs = this.player.duration > 0 ? this.player.duration : this.durationMs;
-      if (this.buffering) {
+      // 只有「本来该在播、却一直没有数据」才算卡死：暂停、播完、以及用户
+      // 拖动进度条的瞬间 `playing` 也仍为 true，但那时 buffering 会短暂为真，
+      // 所以这里再加一道「已播过、位置没变」的宽松判据，避免刚拖完就误判换源。
+      if (this.buffering && this.playing && !this.ended) {
         this.stalledSec += 1;
         if (this.stalledSec >= STALL_LIMIT_SEC && this.errorText.length === 0) {
           this.stalledSec = 0;
@@ -205,9 +265,13 @@ export struct PlayerPage {
       } else {
         this.stalledSec = 0;
       }
-      // 每 5 秒落一次盘，避免退出时丢进度
-      if (this.positionMs > 0 && !this.ended && Math.floor(this.positionMs / 1000) % 5 === 0) {
-        appModel.saveProgress(this.index, this.positionMs, this.durationMs, false);
+      // 每 5 秒落一次盘，避免退出时丢进度。
+      // 原判据是「播放秒数是 5 的倍数」，ticker 每秒一拍时几乎每秒都命中，
+      // 等于每秒写一次 localStorage（HarmonyOS 上是 preferences 同步落盘）。
+      const now = Date.now();
+      if (this.positionMs > 0 && !this.ended && now - this.lastSaveAt >= SAVE_INTERVAL_MS) {
+        this.lastSaveAt = now;
+        appModel.saveProgress(this.index, this.positionMs, this.durationMs, false, this.progressTarget());
       }
     }, 1000) as number;
   }
@@ -215,7 +279,7 @@ export struct PlayerPage {
   private onEnded(): void {
     this.ended = true;
     this.playing = false;
-    appModel.saveProgress(this.index, this.durationMs, this.durationMs, true);
+    appModel.saveProgress(this.index, this.durationMs, this.durationMs, true, this.progressTarget());
     const next = this.index + 1;
     if (appModel.data.settings.autoplayNext && next < this.episodes.length) {
       this.index = next;
@@ -254,7 +318,9 @@ export struct PlayerPage {
         continue;
       }
       try {
-        const detail = await fetchDetailOf(source, c.vodId);
+        // 逐个候选串行探测，每个都套死线：`fetchDetail` 内部两次请求各 9 秒，
+        // 7 个候选全卡就是两分钟，用户只看到「正在切换片源…」，也没法中断。
+        const detail = await withDeadline(fetchDetailOf(source, c.vodId), FAILOVER_TIMEOUT_MS);
         if (detail.length === 0) {
           continue;
         }
@@ -573,6 +639,23 @@ async function fetchDetailOf(source: VodSource, vodId: string): Promise<string[]
   const repo = await import('../data/Repository');
   const detail = await repo.fetchDetail(source, vodId);
   return detail.episodes;
+}
+
+/** 给 promise 套一个死线，超时按失败处理（换源时不能一个候选拖住整轮） */
+async function withDeadline<T>(task: Promise<T>, ms: number): Promise<T> {
+  let timer = -1;
+  const deadline: Promise<T> = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`超过 ${Math.floor(ms / 1000)} 秒未返回`));
+    }, ms) as number;
+  });
+  try {
+    return await Promise.race([task, deadline]);
+  } finally {
+    if (timer >= 0) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export function formatTime(ms: number): string {

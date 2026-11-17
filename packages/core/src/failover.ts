@@ -14,7 +14,7 @@
 
 import { fetchDetail } from './detail';
 import type { HttpClient } from './http';
-import { normalizeTitle } from './cms';
+import { isSameShow, normalizeTitle } from './cms';
 import { searchSources } from './search';
 import type { SearchResultItem, SearchResultItem as SearchItem, SourceConfig, VideoDetail } from './types';
 
@@ -245,22 +245,24 @@ export async function discoverCandidates(
 
   // 同一部片子在不同采集站的命名常带「国语」「高清」等前缀后缀，
   // 用归一化标题做包含判断比完全相等更实用。
-  // 注意关键字本身也必须归一化：下面比对的是 normalizeTitle(item.name)，
-  // 若 wanted 还带着空格与标点（「The Matrix」「流浪地球 2」），
-  // name === wanted / includes / 反向 includes 三条会全部落空，
-  // 跨源补源就等于关掉了——只对中文无空格标题看起来正常。
-  const wanted = normalizeTitle(keyword).toLowerCase();
+  // 但**必须**过季数：换源是自动的，把「庆余年2」当成「庆余年」等于静默播错内容。
   const exclude = opts.exclude ?? new Set<string>();
+  const wanted = normalizeTitle(keyword).toLowerCase();
   const items = result.outcomes
     .flatMap((outcome) => outcome.list)
     .filter((item) => {
       if (exclude.has(candidateKey(item))) return false;
-      const name = normalizeTitle(item.name).toLowerCase();
-      if (!name) return false;
-      return name === wanted || name.includes(wanted) || wanted.includes(name);
-    });
+      return isSameShow(item.name, keyword);
+    })
+    // 完全相同排前面：候选链按源轮转，弱匹配抢在正片前就会被优先切过去
+    .sort((a, b) => rankMatch(a.name, wanted) - rankMatch(b.name, wanted));
 
   return buildPlaybackCandidates(items, sources, { limit: MAX_PLAYBACK_CANDIDATES });
+}
+
+/** 0 = 完全同名，1 = 同片但带前缀/后缀季数差异 */
+function rankMatch(name: string, wanted: string): number {
+  return normalizeTitle(name).toLowerCase() === wanted ? 0 : 1;
 }
 
 export type { SearchResultItem };

@@ -203,6 +203,7 @@ TV 端没有真机也能验：普通 `system-images;android-35;default;x86_64` �
 - [上游分析与「服务端 → 客户端」改造决策](docs/analysis.md)
 - [架构设计（进程模型 / 播放链路 / 投屏链路 / 四端分层）](docs/architecture.md)
 - [内置播放源体检与换血（2026-11，清单 version 7）](docs/source-audit-2026-11.md)
+- [1.3.12 发布说明（快进不再误换源 + 第二轮全项目审计）](docs/release-1.3.12.md)
 - [1.3.11 发布说明（首页单行横滚 + 分类加载提速）](docs/release-1.3.11.md)
 - [1.3.10 发布说明（手机版竖屏修复）](docs/release-1.3.10.md)
 - [1.3.9 发布说明（项目更名为 LibreXTV）](docs/release-1.3.9.md)

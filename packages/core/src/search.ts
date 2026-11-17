@@ -6,7 +6,7 @@
  * 差异：这里是给客户端用的纯函数，HTTP 由调用方注入，且不再做服务端缓存。
  */
 
-import { cmsRequestHeaders, filterAdultResults, filterRelevantResults, parseSearchList } from './cms';
+import { cmsRequestHeaders, cmsUrl, filterAdultResults, filterRelevantResults, parseSearchList } from './cms';
 import { dedupeResults } from './group';
 import { HttpError, type HttpClient } from './http';
 import type { SearchResultItem, SourceConfig, SourceSearchOutcome } from './types';
@@ -66,10 +66,12 @@ async function searchOne(
   const base = source.url.replace(/\/+$/, '');
   const controller = new AbortController();
   const abortOuter = () => controller.abort();
-  opts.signal?.addEventListener('abort', abortOuter, { once: true });
+  // 已经取消的 signal 不会补发 abort 事件：不在这里先判一次，取消就形同虚设，
+  // 下面照样会把每个源都打满（改关键词/关页面的竞态很常见）。
+  if (opts.signal?.aborted) controller.abort();
+  else opts.signal?.addEventListener('abort', abortOuter, { once: true });
 
-  const pageUrl = (page: number) =>
-    `${base}?ac=videolist&wd=${encodeURIComponent(wd)}&pg=${page}`;
+  const pageUrl = (page: number) => cmsUrl(base, { ac: 'videolist', wd, pg: page });
 
   const fetchPage = async (page: number): Promise<CmsSearchPage> => {
     const res = await http.request(pageUrl(page), {

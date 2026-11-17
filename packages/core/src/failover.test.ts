@@ -318,7 +318,37 @@ describe('discoverCandidates', () => {
         ),
     });
     const out = await discoverCandidates('流浪地球', [sources[0]], http);
+    // 「流浪地球2」是续集，换过去会静默播错内容，不再当候选
+    expect(out.map((c) => candidateKey(c)).sort()).toEqual(['a:1']);
+  });
+
+  it('带年份/画质说明的同一部片仍可作候选', async () => {
+    const http = fakeHttp({
+      'a.example.com': () =>
+        jsonResponse(
+          searchBody([
+            { vod_id: 1, vod_name: '流浪地球 4K' },
+            { vod_id: 2, vod_name: '流浪地球(2019)' },
+            { vod_id: 3, vod_name: '流浪地球2' },
+          ])
+        ),
+    });
+    const out = await discoverCandidates('流浪地球', [sources[0]], http);
     expect(out.map((c) => candidateKey(c)).sort()).toEqual(['a:1', 'a:2']);
+  });
+
+  it('完全同名的候选排在弱匹配之前', async () => {
+    const http = fakeHttp({
+      'a.example.com': () =>
+        jsonResponse(
+          searchBody([
+            { vod_id: 1, vod_name: '庆余年 特别篇' },
+            { vod_id: 2, vod_name: '庆余年' },
+          ])
+        ),
+    });
+    const out = await discoverCandidates('庆余年', [sources[0]], http);
+    expect(out.map((c) => candidateKey(c))).toEqual(['a:2', 'a:1']);
   });
 
   it('空片名不发起搜索', async () => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { initBridge, resetBridge } from './lib/bridge';
 import { startCatalogWarmup, stopCatalogWarmup } from './lib/catalog-warmer';
+import { startIndexWarmup, stopIndexWarmup } from './lib/title-index-warmer';
 import { syncDueSubscriptions } from './lib/subscription-sync';
 import { useAppStore } from './lib/store';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -61,6 +62,8 @@ export function App() {
         useAppStore.getState().dedupeHistory();
         // 启动预热分类目录，并在后台每小时刷新一次
         startCatalogWarmup();
+        // 片名索引：后台低优先级慢慢补，供搜索页的字母检索用
+        startIndexWarmup();
         // 到期的订阅在后台静默同步；每半小时再看一眼，长时间挂机也能刷新
         void syncDueSubscriptions().catch(() => undefined);
         const syncTimer = window.setInterval(() => {
@@ -77,6 +80,7 @@ export function App() {
       alive = false;
       if (bootSyncTimer !== undefined) window.clearInterval(bootSyncTimer);
       stopCatalogWarmup();
+      stopIndexWarmup();
     };
   }, [bootAttempt]);
 

@@ -6,7 +6,7 @@
  * 2) 拿不到播放地址时，降级爬详情页 HTML 提取 m3u8。
  */
 
-import { cmsRequestHeaders, parseDetail, parseDetailPageHtml } from './cms';
+import { cmsRequestHeaders, cmsUrl, parseDetail, parseDetailPageHtml } from './cms';
 import { HttpError, type HttpClient } from './http';
 import type { SourceConfig, VideoDetail } from './types';
 
@@ -33,7 +33,7 @@ export async function fetchDetail(
 
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const base = source.url.replace(/\/+$/, '');
-  const api = `${base}?ac=videolist&ids=${encodeURIComponent(id)}`;
+  const api = cmsUrl(base, { ac: 'videolist', ids: id });
 
   // 详情页根地址：显式 detail 优先，其次 baseUrl 参数，最后用接口地址的 origin 推导
   let detailRoot: string;

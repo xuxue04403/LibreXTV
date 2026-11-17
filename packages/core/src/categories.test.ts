@@ -6,9 +6,11 @@ import {
   categoryLabel,
   classifyCategoryName,
   fetchSourceCategories,
+  hasActiveFilter,
   HOME_CATEGORIES,
   matchTypeId,
   matchTypeIds,
+  matchesCategoryFilter,
   parseSourceCategories,
   probeCategories,
   clearProbeCache,
@@ -16,7 +18,7 @@ import {
   clearCategoryCache,
 } from './categories';
 import type { HttpClient, HttpResponse } from './http';
-import type { SourceConfig } from './types';
+import type { SourceConfig, SearchResultItem } from './types';
 
 function res(body: unknown, status = 200): HttpResponse {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -736,6 +738,33 @@ describe('分类表在途去重', () => {
     const second = await browseCategory({ sources: [source], key: 'movie', http });
     expect(second.outcomes[0].ok).toBe(true);
   });
+
+  it('先到者取消后，后来者仍能拿到分类（共享请求不绑调用者的 signal）', async () => {
+    // 首页预算到期（或用户离开页面）会 abort 那一轮请求；如果共享的
+    // 在途 promise 绑的是首个调用者的 signal，后来者就会拿到同一个
+    // 正在取消的 promise，而且失败结果会被缓存 10 分钟。
+    clearCategoryCache();
+    let listCalls = 0;
+    const http: HttpClient = {
+      async request(url) {
+        if (url.includes('ac=list')) {
+          listCalls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        }
+        return res({ pagecount: 1, list: [] });
+      },
+    };
+    const leaver = new AbortController();
+    const first = browseCategory({ sources: [source], key: 'movie', http, signal: leaver.signal, budgetMs: 5_000 });
+    const second = browseCategory({ sources: [source], key: 'tv', http, budgetMs: 5_000 });
+    leaver.abort();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.outcomes[0].ok).toBe(false);
+    expect(b.outcomes[0].ok).toBe(true);
+    // 两个分类共用同一份在途分类表，只请求一次
+    expect(listCalls).toBe(1);
+  });
 });
 
 describe('browseCategory 的总时限', () => {
@@ -779,5 +808,122 @@ describe('browseCategory 的总时限', () => {
     expect(result.items).toHaveLength(1);
     expect(result.outcomes[0].timedOut).toBeFalsy();
     expect(result.outcomes[0].ok).toBe(true);
+  });
+});
+
+describe('分类筛选（year/area）', () => {
+  const item = (over: Partial<SearchResultItem>): SearchResultItem => ({
+    sourceKey: 'k1',
+    sourceName: '甲源',
+    vodId: '1',
+    name: '片名',
+    ...over,
+  });
+
+  it('hasActiveFilter 把「全部」和空串都当作不筛', () => {
+    expect(hasActiveFilter(undefined)).toBe(false);
+    expect(hasActiveFilter({})).toBe(false);
+    expect(hasActiveFilter({ year: '全部', area: '全部' })).toBe(false);
+    expect(hasActiveFilter({ year: '  ' })).toBe(false);
+    expect(hasActiveFilter({ year: '2024' })).toBe(true);
+    expect(hasActiveFilter({ area: '美国' })).toBe(true);
+  });
+
+  it('按年份精确匹配', () => {
+    const filter = { year: '2024' };
+    expect(matchesCategoryFilter(item({ year: '2024' }), filter)).toBe(true);
+    expect(matchesCategoryFilter(item({ year: '1998' }), filter)).toBe(false);
+    // 数字类型的年份也要能比
+    expect(matchesCategoryFilter(item({ year: 2024 as unknown as string }), filter)).toBe(true);
+  });
+
+  it('缺 year 字段时保留条目，不因源站少填字段就吞掉影片', () => {
+    expect(matchesCategoryFilter(item({}), { year: '2024' })).toBe(true);
+  });
+
+  it('地区匹配容忍同义写法', () => {
+    const filter = { area: '大陆' };
+    expect(matchesCategoryFilter(item({ area: '大陆' }), filter)).toBe(true);
+    expect(matchesCategoryFilter(item({ area: '中国大陆' }), filter)).toBe(true);
+    expect(matchesCategoryFilter(item({ area: '内地' }), filter)).toBe(true);
+    expect(matchesCategoryFilter(item({ area: '美国' }), filter)).toBe(false);
+  });
+
+  it('「美国」不会误命中「美国队长」这类非地区值以外的正常地区', () => {
+    expect(matchesCategoryFilter(item({ area: '美國' }), { area: '美国' })).toBe(true);
+    expect(matchesCategoryFilter(item({ area: '英国' }), { area: '美国' })).toBe(false);
+  });
+
+  it('无筛选时全部通过', () => {
+    expect(matchesCategoryFilter(item({ year: '1998', area: '美国' }))).toBe(true);
+    expect(matchesCategoryFilter(item({}), { year: '全部', area: '全部' })).toBe(true);
+  });
+
+  it('browseCategory 把 year/area 拼进请求 URL', async () => {
+    clearCategoryCache();
+    const seen: string[] = [];
+    const http: HttpClient = {
+      async request(url) {
+        seen.push(url);
+        if (url.includes('ac=list')) return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        return res({ pagecount: 1, list: [] });
+      },
+    };
+    await browseCategory({
+      sources: [{ key: 'f1', name: '筛选源', url: 'https://f.example.com/api.php/provide/vod' }],
+      key: 'movie',
+      http,
+      filter: { year: '2024', area: '大陆' },
+    });
+    const browse = seen.find((u) => u.includes('ac=videolist'));
+    expect(browse).toBeDefined();
+    expect(browse).toContain('year=2024');
+    expect(browse).toContain(`area=${encodeURIComponent('大陆')}`);
+  });
+
+  it('不支持的源返回整个分类时，本地兜底把不符合的条目滤掉', async () => {
+    clearCategoryCache();
+    const http: HttpClient = {
+      async request(url) {
+        if (url.includes('ac=list')) return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        // 模拟红牛这类忽略 year 的源：照旧返回全部年份
+        return res({
+          pagecount: 1,
+          list: [
+            { vod_id: 1, vod_name: '新片', type_name: '电影', vod_year: '2024', vod_area: '大陆' },
+            { vod_id: 2, vod_name: '老片', type_name: '电影', vod_year: '1998', vod_area: '大陆' },
+            { vod_id: 3, vod_name: '外语片', type_name: '电影', vod_year: '2024', vod_area: '美国' },
+          ],
+        });
+      },
+    };
+    const result = await browseCategory({
+      sources: [{ key: 'hot', name: '不支持筛选的源', url: 'https://h.example.com/api.php/provide/vod' }],
+      key: 'movie',
+      http,
+      filter: { year: '2024', area: '大陆' },
+    });
+    expect(result.items.map((i) => i.name)).toEqual(['新片']);
+  });
+
+  it('筛选条件不同不会串用缓存', async () => {
+    clearCategoryCache();
+    let hits = 0;
+    const http: HttpClient = {
+      async request(url) {
+        if (url.includes('ac=list')) return res({ class: [{ type_id: 1, type_name: '电影' }] });
+        hits += 1;
+        return res({ pagecount: 1, list: [{ vod_id: hits, vod_name: `第${hits}次`, type_name: '电影' }] });
+      },
+    };
+    const base = {
+      sources: [{ key: 'c1', name: '缓存源', url: 'https://c.example.com/api.php/provide/vod' }],
+      key: 'movie' as const,
+      http,
+    };
+    const first = await browseCategory({ ...base, filter: { year: '2024' } });
+    const second = await browseCategory({ ...base, filter: { year: '2023' } });
+    expect(first.items[0].name).not.toBe(second.items[0].name);
+    expect(hits).toBe(2);
   });
 });

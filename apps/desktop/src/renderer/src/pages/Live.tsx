@@ -295,7 +295,7 @@ export function LivePage({ onOpenSettings }: { onOpenSettings: () => void }) {
       flushLiveCacheWrite();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveSources.map((s) => s.key).join(','), adultFilter]);
+  }, [liveSources.map((s) => `${s.key}=${s.url}`).join(','), adultFilter]);
 
   /** 分组 + 计数一次算完：原来每个分组各 filter 一遍，上千个分组时明显卡 */
   const { groups, counts } = useMemo(() => {

@@ -23,7 +23,7 @@ import {
   type QualityEntry,
   type SourceConfig,
 } from '@librextv/core';
-import { assertAllowedTarget } from './proxy';
+import { assertAllowedTarget, fetchChecked } from './proxy';
 import {
   decryptAes128CbcPrefix,
   looksLikeMp4,
@@ -110,7 +110,9 @@ async function fetchBytesPrefix(
   } catch {
     return undefined;
   }
-  const res = await fetch(url, { headers: prefixHeaders(source), signal, redirect: 'follow' });
+  // 必须用 fetchChecked 而不是裸 fetch：裸 fetch 的 redirect:'follow' 只校验首跳，
+  // 恶意源站回一个 302 到 127.0.0.1 就能绕过 SSRF 防护打内网。
+  const res = await fetchChecked(new URL(url), { headers: prefixHeaders(source), signal }, false);
   if (!res.ok) return undefined;
   return readBytesPrefix(res, maxBytes);
 }
@@ -126,7 +128,8 @@ async function fetchTextPrefix(
   } catch (err) {
     return { ok: false, status: 0, text: err instanceof Error ? err.message : '地址不可用' };
   }
-  const res = await fetch(url, { headers: prefixHeaders(source), signal, redirect: 'follow' });
+  // 同上：逐跳校验重定向，不能只信首跳
+  const res = await fetchChecked(new URL(url), { headers: prefixHeaders(source), signal }, false);
   if (!res.ok) return { ok: false, status: res.status, text: '' };
   return { ok: true, status: res.status, text: await readTextPrefix(res, maxBytes) };
 }

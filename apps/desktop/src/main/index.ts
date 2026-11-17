@@ -350,9 +350,8 @@ ipcMain.handle(
     const streamId = options?.streamId ?? ++streamSeq;
     const controller = new AbortController();
     activeStreams.set(streamId, controller);
-    // 先把分配到的 id 告诉渲染层：chunk 是在 invoke 返回**之前**就一路推过去的，
-    // 渲染层只能靠这个事件知道「自己该听哪个 id」。
-    event.sender.send('http:stream:started', streamId);
+    // 不再用 `http:stream:started` 广播分配 id：那是 webContents 级广播，并发开流时
+    // 各 invoke 会互相抢「第一个收到的 id」。现在 id 由 preload 在开流前定好传下来。
     const idleTimeoutMs = Math.min(120_000, Math.max(5_000, options?.idleTimeoutMs ?? 30_000));
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     const armIdle = (): void => {

@@ -69,6 +69,10 @@ export class HttpError extends Error {
 
 /** 合并外部 signal 与超时 signal（AbortSignal.any 不可用时退化为先到先中断） */
 function withTimeout(signal: AbortSignal | undefined, timeoutMs: number | undefined): AbortSignal | undefined {
+  // 入口先看已经被取消的情况：`addEventListener` 不会补发过去的 abort，
+  // 已经 aborted 的 signal 合进来只会得到一个「永远不 abort」的 controller，
+  // 调用方以为取消生效了、请求照常打满整个超时。
+  if (signal?.aborted) return signal;
   const timeout = timeoutMs && timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
   if (!timeout) return signal;
   if (!signal) return timeout;
@@ -76,9 +80,33 @@ function withTimeout(signal: AbortSignal | undefined, timeoutMs: number | undefi
   if (typeof anyFn === 'function') return anyFn([signal, timeout]);
   const controller = new AbortController();
   const abort = () => controller.abort();
+  const cleanup = () => {
+    signal.removeEventListener('abort', abort);
+    timeout.removeEventListener('abort', abort);
+  };
   signal.addEventListener('abort', abort, { once: true });
   timeout.addEventListener('abort', abort, { once: true });
+  // 任一先到就摘掉另一个：同一外部 signal 会被一个页面的多次请求复用，
+  // 不摘除的话监听器随请求数累积，闭包一直持有 controller。
+  controller.signal.addEventListener('abort', cleanup, { once: true });
   return controller.signal;
+}
+
+/**
+ * 把 body 阶段的 AbortError 映射成 408，否则超时会被当成普通网络错误。
+ * 但**用户主动取消不算超时**：两者都是 AbortError，靠 external.signal 区分，
+ * 否则上层会把「切搜索词/关页面」显示成超时，quality 还会当成可重试。
+ */
+async function readAll(res: Response, external?: AbortSignal): Promise<Uint8Array> {
+  try {
+    return new Uint8Array(await res.arrayBuffer());
+  } catch (err) {
+    if (external?.aborted) throw new HttpError('已取消', 0);
+    if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+      throw new HttpError('请求超时', 408);
+    }
+    throw new HttpError(err instanceof Error ? err.message : '读取响应失败', 0);
+  }
 }
 
 /** 基于全局 fetch 的实现（Electron 渲染层 / 浏览器 / Node 18+ 可用） */
@@ -88,6 +116,9 @@ export function createFetchHttp(fetchImpl?: typeof fetch): HttpClient {
   async function send(url: string, options: HttpRequestOptions = {}): Promise<Response> {
     if (typeof doFetch !== 'function') throw new HttpError('当前环境没有 fetch 实现', 0);
     const { method = 'GET', headers = {}, body, timeoutMs, signal } = options;
+    // 已经取消的请求不再发出去：上层（切搜索词、关页面）发起的请求可能排在
+    // 限流队列里等着，等它拿到令牌时用户早就走了，白打一次上游
+    if (signal?.aborted) throw new HttpError('已取消', 0);
     try {
       return await doFetch(url, {
         method,
@@ -97,6 +128,7 @@ export function createFetchHttp(fetchImpl?: typeof fetch): HttpClient {
         signal: withTimeout(signal, timeoutMs),
       });
     } catch (err) {
+      if (signal?.aborted) throw new HttpError('已取消', 0);
       if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
         throw new HttpError('请求超时', 408);
       }
@@ -115,7 +147,7 @@ export function createFetchHttp(fetchImpl?: typeof fetch): HttpClient {
   return {
     async request(url, options = {}) {
       const res = await send(url, options);
-      const buf = new Uint8Array(await res.arrayBuffer());
+      const buf = await readAll(res, options.signal);
       return {
         ok: res.ok,
         status: res.status,
@@ -130,7 +162,25 @@ export function createFetchHttp(fetchImpl?: typeof fetch): HttpClient {
       const { onChunk, idleTimeoutMs = 20_000, maxBytes = DEFAULT_STREAM_MAX_BYTES, ...rest } = options;
       // 总时长不设死线（大列表可能合法地下一分钟），只设「多久没数据」的空闲死线。
       // 但连接阶段必须有人管：上游接受连接后一直不响应时，下面那句 read() 会永久挂住。
-      const res = await send(url, { ...rest, timeoutMs: idleTimeoutMs });
+      //
+      // 关键：**不能把 idleTimeoutMs 当 timeoutMs 传给 send()**。那个 signal 在整个
+      // body 生命周期内有效，会把「空闲死线」变成「总时长死线」——实测 iptv-org 的
+      // 2.5MB M3U 要下 70 秒，20 秒就掐断，直播列表被静默截断且没有任何报错。
+      // 所以这里只给连接阶段一个短死线：拿到响应头之后立刻解除。
+      const conn = new AbortController();
+      const connTimer = setTimeout(() => conn.abort(), idleTimeoutMs);
+      const external = rest.signal;
+      const connSignal = external ? AbortSignal.any([external, conn.signal]) : conn.signal;
+      let res: Response;
+      try {
+        res = await send(url, { ...rest, signal: connSignal, timeoutMs: undefined });
+      } catch (err) {
+        clearTimeout(connTimer);
+        if (err instanceof HttpError && external?.aborted) throw new HttpError('已取消', 0);
+        if (conn.signal.aborted) throw new HttpError('连接超时', 408);
+        throw err;
+      }
+      clearTimeout(connTimer);
       const chunks: Uint8Array[] = [];
       let total = 0;
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -167,7 +217,11 @@ export function createFetchHttp(fetchImpl?: typeof fetch): HttpClient {
           }
         } catch (err) {
           if (timedOut) throw new HttpError('请求超时', 408);
+          if (external?.aborted) throw new HttpError('已取消', 0);
           if (err instanceof Error && err.name === 'AbortError') throw new HttpError('请求超时', 408);
+          // onChunk 抛错时不能只把异常往上扔：不取消的话上游会继续把剩下的内容推完，
+          // 连接一直挂到空闲死线（与上面 maxBytes 分支同样的道理）
+          void reader?.cancel().catch(() => undefined);
           throw new HttpError(err instanceof Error ? err.message : '网络请求失败', 0);
         } finally {
           if (idleTimer) clearTimeout(idleTimer);

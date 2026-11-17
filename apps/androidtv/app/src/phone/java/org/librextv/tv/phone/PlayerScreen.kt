@@ -76,8 +76,13 @@ private const val SEEK_STEP_MS = 10_000L
 /** HLS 播放列表判定：只有 HLS 才有分片可预取 */
 private val HLS_URL = Regex("""\.m3u8($|[?#&/])""", RegexOption.IGNORE_CASE)
 
-/** 连续缓冲超过这个时长就判定为卡死并换源（秒） */
-private const val STALL_SECONDS = 15
+/**
+ * 连续多久「一点进展都没有」才判定卡死并换源（秒）。
+ *
+ * 判据是「缓冲位置不再前进」，不是「一直 buffering」：快进/拖动时播放器会丢弃
+ * 在途分片按新位置重新取数据，buffering 是常态。阈值同时放大到 30 秒。
+ */
+private const val STALL_SECONDS = 30
 
 /** 手机上没有遥控器，控件显示后静止这么久就自动隐藏，免得挡住画面 */
 private const val CONTROLS_HIDE_MS = 4_000L
@@ -113,6 +118,15 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
     var note by remember { mutableStateOf<String?>(null) }
     var ended by remember { mutableStateOf(false) }
     var failingOver by remember { mutableStateOf(false) }
+    /**
+     * 换源/重试时要续上的播放位置（毫秒，-1 表示不续）。
+     *
+     * 换源只换「从哪个站取同一集」，用户看的位置不该丢。之前换源后总是从 0:00
+     * 重播，而且 4 秒一次的进度落盘会把 0 附近的位置写进历史，把正确的续播点覆盖掉。
+     */
+    var resumeAt by remember { mutableStateOf<Pair<Int, Long>?>(null) }
+    /** 「重试」按钮的重置计数：参与看门狗键，按下后卡死计数从头算 */
+    var retryNonce by remember { mutableIntStateOf(0) }
     var resumedOnce by remember { mutableStateOf(false) }
     var rate by remember { mutableFloatStateOf(1f) }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -192,6 +206,8 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
                     discovered = discovered || result.target.candidates.any { it.key !in target.candidates.map { c -> c.key } }
                     error = null
                     note = "已切换到「${result.candidate.sourceName}」"
+                    // 换的是「同一集的另一条线」，用户看的位置必须续上
+                    resumeAt = index to exo.currentPosition.coerceAtLeast(0)
                     // 这里不能再调 play()：下面的 LaunchedEffect 会因 current/index 变化重跑，
                     // 两处都调会连续 setMediaSource+prepare 两次，表现为换源后多等一个超时周期
                     current = result.target
@@ -238,6 +254,13 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
                 vm.showToast("已从 ${formatMs(hist.positionMs)} 继续播放")
             }
         }
+        // 换源/重试带过来的位置（优先级高于历史续播：用户刚刚正在看这里）。
+        // 只在「还是同一集」时续用：中途换了集就按新集从头播。
+        val pending = resumeAt
+        if (pending != null && pending.first == index) {
+            resumeAt = null
+            exo.seekTo(pending.second)
+        }
     }
 
     DisposableEffect(exo) {
@@ -278,15 +301,38 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
     LaunchedEffect(Unit) {
         var tick = 0
         var stalled = 0
+        var lastBuffered = -1L
+        var lastPos = -1L
+        var stallKey = ""
         while (true) {
+            // 换源 / 换集 / 按过「重试」都要把卡死计数清零：上一轮攒下的计数若留着，
+            // 新源刚 prepare 的 1~2 秒内就会凑满 30 拍，把用户刚选中的源立刻换走。
+            val key = "${current.source.key}:${current.vodId}:$index:$retryNonce"
+            if (key != stallKey) {
+                stallKey = key
+                stalled = 0
+                lastBuffered = -1L
+                lastPos = -1L
+            }
+            val pos = exo.currentPosition.coerceAtLeast(0)
             if (!scrubbing) {
-                position = exo.currentPosition.coerceAtLeast(0)
+                position = pos
                 val d = exo.duration
                 duration = if (d > 0) d else 0
             }
             tick++
-            // 一直缓冲不动就是死了：ExoPlayer 自己不超时，靠这里兜底换源
-            stalled = if (buffering && !exo.isPlaying) stalled + 1 else 0
+            // 「卡死」= 缓冲中、不在拖动进度条、且缓冲位置和播放位置都不再前进。
+            // 旧判据只看 buffering：连续快进时 buffering 是常态，会把能播的源换走。
+            // ExoPlayer 没有公开 seeking 状态，用位置跳变判跳转（1 秒最多 2 倍速）。
+            // 用 playWhenReady 排除「用户自己暂停 / 退到后台」：那时本来就没有进展。
+            val buffered = exo.bufferedPosition
+            val delta = if (lastPos < 0) 0L else pos - lastPos
+            val jumped = delta > 2_500L || delta < -2_500L
+            val progressed = buffered > lastBuffered || delta != 0L
+            lastBuffered = buffered
+            lastPos = pos
+            val frozen = buffering && exo.playWhenReady && !exo.isPlaying && !scrubbing && !jumped && !progressed
+            stalled = if (frozen) stalled + 1 else 0
             if (stalled >= STALL_SECONDS && error == null && !failingOver) {
                 stalled = 0
                 tryFailover("加载超时", false)
@@ -395,13 +441,27 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
                     })
                     PhoneButton("重试", onClick = {
                         error = null
+                        // 位置与卡死计数一起归零，否则「重试」等于从头播 + 立刻再被判死
+                        resumeAt = index to exo.currentPosition.coerceAtLeast(0)
+                        retryNonce += 1
+                        buffering = true
                         exo.prepare()
                         exo.play()
                     })
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PhoneButton("下一集", onClick = {
-                        if (index + 1 < current.episodes.size) index += 1 else note = "已经是最后一集"
+                        if (index + 1 < current.episodes.size) {
+                            // 与其它换集入口一致：不重置 tried 的话，新一集第一次出错
+                            // 就会因「候选链已耗尽」直接放弃，明明有可用源也不试
+                            resumeAt = null
+                            tried.clear()
+                            tried += "${current.source.key}:${current.vodId}"
+                            discovered = false
+                            index += 1
+                        } else {
+                            note = "已经是最后一集"
+                        }
                     })
                     PhoneButton("返回", onClick = onExit)
                 }

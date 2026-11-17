@@ -221,7 +221,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 待落盘的目录快照：合并同一轮刷新里的多次变更，只写最后一次 */
     private var pendingCatalogSave: CatalogSnapshot? = null
-    private var catalogSaveJob: Job? = null
+    /** 合并落盘的循环是否在跑；用独立标志而不是 `job.isActive`，避免收尾瞬间的竞态漏写 */
+    private var catalogSaveRunning = false
 
     private var searchJob: Job? = null
 
@@ -237,6 +238,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 上次落盘的拼音索引条数，用来判断「攒够没有」 */
     private var persistedIndexSize: Int = 0
 
+    /**
+     * 记下快照并合并落盘（见 [init] 里的说明）。
+     *
+     * 用独立标志 `catalogSaveRunning` 而不是 `job.isActive`：协程把标志置回 false 之后、
+     * job 真正结束之前还有一瞬间，此时若来了新快照，按 `isActive` 判断会认为「已有
+     * 任务在跑」而不排新任务 —— 这份快照就永远停在内存里，下次冷启动少内容。
+     * 标志位 + 收尾再补排一次，把这个窗口关掉。
+     */
+    private fun scheduleCatalogSave() {
+        if (catalogSaveRunning) return
+        catalogSaveRunning = true
+        viewModelScope.launch {
+            try {
+                delay(CATALOG_SAVE_DEBOUNCE_MS)
+                // 落盘期间来的新快照只覆盖 pending，写完再看一眼，直到写空为止
+                while (true) {
+                    val latest = pendingCatalogSave ?: break
+                    pendingCatalogSave = null
+                    runCatchingCancellable { store.saveCatalog(latest) }
+                }
+            } finally {
+                catalogSaveRunning = false
+            }
+            if (pendingCatalogSave != null) scheduleCatalogSave()
+        }
+    }
+
     init {
         // 目录缓存一有变化就落盘：loadCategory 抓到的新内容不该等到下一个小时才保住。
         //
@@ -246,14 +274,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // 期间再来的只覆盖不排队，一次刷新最终只落一次盘。
         repo.onCatalogChanged = { snapshot ->
             pendingCatalogSave = snapshot
-            if (catalogSaveJob?.isActive != true) {
-                catalogSaveJob = viewModelScope.launch {
-                    delay(CATALOG_SAVE_DEBOUNCE_MS)
-                    val latest = pendingCatalogSave
-                    pendingCatalogSave = null
-                    if (latest != null) runCatchingCancellable { store.saveCatalog(latest) }
-                }
-            }
+            scheduleCatalogSave()
         }
         viewModelScope.launch {
             seedIfNeeded()
@@ -843,6 +864,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // —— 搜索 ——
+
+    /**
+     * 输入即出的片名候选（零网络，同步返回）。
+     *
+     * 电视端遥控器输中文极难，这条路径让人敲一两个字母就能看见候选片名、
+     * 直接点选即可，不必先把整个词打完。
+     */
+    fun suggestTitles(query: String, limit: Int = 12): List<SearchItem> =
+        runCatching { repo.suggestTitles(query, limit) }.getOrDefault(emptyList())
+
     fun startSearch(keyword: String) {
         val word = keyword.trim()
         if (word.isEmpty()) return

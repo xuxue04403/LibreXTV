@@ -64,4 +64,61 @@ describe('http.stream', () => {
     const res = await http.stream!('http://example.com/big.m3u', { onChunk: () => undefined });
     expect(res.bytes.byteLength).toBe(2 * 1024 * 1024);
   });
+
+  it('onChunk 抛错时取消底层流，不让上游继续推完', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode('x'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const http = createFetchHttp((async () => new Response(body)) as typeof fetch);
+    await expect(
+      http.stream!('http://example.com/loop.m3u', {
+        onChunk: () => {
+          throw new Error('回调炸了');
+        },
+      })
+    ).rejects.toThrow('回调炸了');
+    expect(cancelled).toBe(true);
+  });
+
+  it('主动取消记成「已取消」，不是「请求超时」', async () => {
+    // 记成 408 会被 quality.ts 的 isRetryableTimeout 当成可重试超时，
+    // 于是在用户已经离开页面之后还继续重试别家的源。
+    const http = createFetchHttp((async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([65]));
+          signal?.addEventListener('abort', () => {
+            controller.error(new DOMException('aborted', 'AbortError'));
+          });
+        },
+      });
+      return new Response(body);
+    }) as unknown as typeof fetch);
+    const controller = new AbortController();
+    const task = http.request('http://example.com/a', { signal: controller.signal });
+    setTimeout(() => controller.abort(), 10).unref?.();
+    await expect(task).rejects.toMatchObject({ message: '已取消', status: 0 });
+  });
+
+  it('已经取消的 signal 不再发请求', async () => {
+    let calls = 0;
+    const http = createFetchHttp((async () => {
+      calls += 1;
+      return streamingResponse([new Uint8Array([65])]);
+    }) as unknown as typeof fetch);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(http.request('http://example.com/b', { signal: controller.signal })).rejects.toMatchObject({
+      message: '已取消',
+      status: 0,
+    });
+    expect(calls).toBe(0);
+  });
 });

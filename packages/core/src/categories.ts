@@ -5,7 +5,7 @@
  * 所以不能写死 1=电影。这里以「分类名 → 统一桶」的方式建立映射，再回查该源自己的 type_id。
  */
 
-import { cmsRequestHeaders, filterAdultResults, parseSearchList } from './cms';
+import { cmsRequestHeaders, cmsUrl, filterAdultResults, parseSearchList } from './cms';
 import { HttpError, type HttpClient } from './http';
 import { catalogLimiter, sourceLimiter } from './limiter';
 import type { SearchResultItem, SourceConfig } from './types';
@@ -215,6 +215,78 @@ export function matchTypeIds(categories: SourceCategory[], key: CategoryKey, lim
 export interface CategoryFetchOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** 服务端筛选（只有部分源实现，见 `matchesCategoryFilter` 的注释） */
+  filter?: CategoryFilter;
+}
+
+/**
+ * 分类浏览的筛选条件。
+ *
+ * Apple CMS 的 `?ac=videolist` 支持 `year=` 与 `area=` 两个查询参数，但**支持面很窄**：
+ * 实测 14 个内置源里只有 6 个（非凡、量子、电影天堂、暴风、西瓜，再加组合可用）
+ * 能同时按年份和地区过滤，魔都/360/极速/海海只吃 `year`，而红牛、百度、金鹰、
+ * 新浪、光速五个源完全忽略这两个参数（传了也返回整个分类）。
+ *
+ * `letter=` 与 `by=`/`order=` 在所有源上都无效，所以排序与字母筛选只能在前端做。
+ */
+export interface CategoryFilter {
+  /** 年份，如 '2024'；'全部' 或空串表示不筛 */
+  year?: string;
+  /** 地区，如 '大陆'/'美国'；'全部' 或空串表示不筛 */
+  area?: string;
+}
+
+/** 该筛选是否真的需要发请求（全「全部」时不要往 URL 上加无用参数） */
+export function hasActiveFilter(filter?: CategoryFilter): boolean {
+  if (!filter) return false;
+  return Boolean(cleanFilterValue(filter.year) ?? cleanFilterValue(filter.area));
+}
+
+function cleanFilterValue(value?: string): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '全部') return undefined;
+  return trimmed;
+}
+
+/**
+ * 客户端兜底筛选。
+ *
+ * 服务端不支持 `year`/`area` 的源收到筛选条件会原样返回整个分类（实测红牛传
+ * `year=2024` 仍是 5316 条），如果只依赖服务端，用户会看到「筛了 2024 却混进
+ * 1998 年的片子」。所以每个源返回后都要在本地再过一遍——对支持服务端筛选的源
+ * 这是重复劳动（结果本来就全中），但换来的是所有源表现一致。
+ *
+ * 条目缺 year/area 字段时**保留**：宁可多显示一条，也不要因为源站少填一个字段
+ * 就把正常影片吞掉。
+ */
+export function matchesCategoryFilter(item: SearchResultItem, filter?: CategoryFilter): boolean {
+  if (!filter) return true;
+  const year = cleanFilterValue(filter.year);
+  const area = cleanFilterValue(filter.area);
+  if (year && item.year && String(item.year) !== year) return false;
+  if (area && item.area && !areaMatches(item.area, area)) return false;
+  return true;
+}
+
+/**
+ * 地区匹配要容忍「大陆 / 中国大陆 / 内地」这类同义写法：
+ * 各采集站填的 `vod_area` 并不统一，严格相等会把大半结果筛掉。
+ */
+function areaMatches(actual: string, wanted: string): boolean {
+  const a = actual.trim();
+  const w = wanted.trim();
+  if (a === w) return true;
+  if (a.includes(w) || w.includes(a)) return true;
+  const aliases: Record<string, string[]> = {
+    大陆: ['中国大陆', '内地', '中国'],
+    中国: ['中国大陆', '大陆', '内地'],
+    台湾: ['中国台湾', '台湾地区'],
+    香港: ['中国香港', '香港地区'],
+    美国: ['美國'],
+    日本: ['日本国'],
+  };
+  return (aliases[w] ?? []).some((alias) => a.includes(alias));
 }
 
 /** 读取某源的分类表：`?ac=list` 会带回 class 数组 */
@@ -224,7 +296,7 @@ export async function fetchSourceCategories(
   opts: CategoryFetchOptions = {}
 ): Promise<SourceCategory[]> {
   const base = source.url.replace(/\/+$/, '');
-  const url = `${base}?ac=list&pg=1`;
+  const url = cmsUrl(base, { ac: 'list', pg: 1 });
   const res = await catalogLimiter(() =>
     http.request(url, {
       headers: cmsRequestHeaders(),
@@ -257,7 +329,13 @@ export async function browseSourceCategory(
   opts: CategoryFetchOptions = {}
 ): Promise<CategoryBrowsePage> {
   const base = source.url.replace(/\/+$/, '');
-  const url = `${base}?ac=videolist&t=${encodeURIComponent(typeId)}&pg=${Math.max(1, page)}`;
+  const params: Record<string, string | number> = { ac: 'videolist', t: typeId, pg: Math.max(1, page) };
+  // 服务端筛选：只有部分源认这两个参数，不认的源会在 `browseCategory` 里被本地兜底过滤
+  const year = cleanFilterValue(opts.filter?.year);
+  const area = cleanFilterValue(opts.filter?.area);
+  if (year) params.year = year;
+  if (area) params.area = area;
+  const url = cmsUrl(base, params);
   const res = await catalogLimiter(() =>
     sourceLimiter(base)(() =>
       http.request(url, {
@@ -362,6 +440,14 @@ export interface CategoryBrowseOptions {
    * 不再拖住整个页面。
    */
   budgetMs?: number;
+  /**
+   * 年份/地区筛选。
+   *
+   * 服务端支持面只有 6/14（见 `CategoryFilter` 注释），所以这里是**双管齐下**：
+   * 请求时带上 `year`/`area`（能筛的源直接在服务端收窄，省流量也省时间），
+   * 返回后再用 `matchesCategoryFilter` 本地过一遍（不支持的源靠这层兜底）。
+   */
+  filter?: CategoryFilter;
 }
 
 /**
@@ -377,6 +463,30 @@ export interface CategoryBrowseOptions {
  */
 const inflightCategories = new Map<string, Promise<SourceCategory[]>>();
 
+function abortError(): Error {
+  const err = new Error('已取消');
+  err.name = 'AbortError';
+  return err;
+}
+
+/** 让调用者用自己的 signal 取消共享请求，不影响其他调用者 */
+function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    const settle = (fn: () => void) => {
+      signal.removeEventListener('abort', onAbort);
+      fn();
+    };
+    promise.then(
+      (value) => settle(() => resolve(value)),
+      (err) => settle(() => reject(err))
+    );
+  });
+}
+
 /** 取某源的分类表（带 6 小时缓存 + 在途去重） */
 async function categoriesOf(
   source: SourceConfig,
@@ -387,9 +497,13 @@ async function categoriesOf(
   if (cached) return cached;
 
   const inflight = inflightCategories.get(source.url);
-  if (inflight) return inflight;
+  // 在途请求是**共享**的，谁都不许把它绑在自己的 signal 上：
+  // 先到者被取消（离开页面、预算到期 inner.abort()）时，后来者若 await 同一条
+  // 正在取消的 promise，会把别人的取消当成自己失败，而且「该源不支持分类」
+  // 还会被缓存 10 分钟——首页就此少掉这个源。
+  if (inflight) return raceAbort(inflight, opts.signal);
 
-  const promise = fetchSourceCategories(source, http, opts)
+  const promise = fetchSourceCategories(source, http, { ...opts, signal: undefined })
     .then((categories) => {
       setCachedCategories(source.url, categories);
       return categories;
@@ -399,7 +513,7 @@ async function categoriesOf(
       if (inflightCategories.get(source.url) === promise) inflightCategories.delete(source.url);
     });
   inflightCategories.set(source.url, promise);
-  return promise;
+  return raceAbort(promise, opts.signal);
 }
 
 /**
@@ -421,7 +535,9 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
   // 每次都打 4 个源 × 6 个子分类，体感就是「每次都在重新加载播放源」。
   const cacheKey =
     pages === 1 && startPage === 1
-      ? `${opts.key}|${filterAdult ? 1 : 0}|${typeLimit}|${opts.sources
+      ? `${opts.key}|${filterAdult ? 1 : 0}|${typeLimit}|${cleanFilterValue(opts.filter?.year) ?? ''}|${
+          cleanFilterValue(opts.filter?.area) ?? ''
+        }|${opts.sources
           .map((s) => s.url)
           .sort()
           .join(',')}`
@@ -545,6 +661,7 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
               const result = await browseSourceCategory(source, typeId, page, opts.http, {
                 timeoutMs,
                 signal,
+                filter: opts.filter,
               });
               list.push(...result.items);
               if (page >= result.pageCount) break;
@@ -553,8 +670,12 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
           })
         );
 
-        // 「伦理片」这类名字带「片」，会被归档到电影桶，因此必须在分类浏览里也做成人过滤
-        const list = filterAdultResults(batches.flat(), filterAdult);
+        // 「伦理片」这类名字带「片」，会被归档到电影桶，因此必须在分类浏览里也做成人过滤。
+        // 紧接着过一遍 year/area：不认这两个参数的源（14 个里 5 个）会把整个分类
+        // 原样吐回来，不兜底就会出现「筛了 2024 却混进 1998 年的片子」。
+        const list = filterAdultResults(batches.flat(), filterAdult).filter((item) =>
+          matchesCategoryFilter(item, opts.filter)
+        );
         record(source, finish({ ok: true, supported: true, count: list.length }, list));
       } catch (err) {
         // 已经超时返回之后才 reject 的那些源不必再记一笔（结果集已定），

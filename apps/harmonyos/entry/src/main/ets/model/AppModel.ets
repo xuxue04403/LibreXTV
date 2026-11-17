@@ -100,6 +100,31 @@ export class DetailTarget {
   }
 }
 
+/**
+ * 落进度时用的「当前播放对象」。
+ *
+ * 不能只看 `playerTarget`：换源之后播放页的源与分集已经变了，而 `playerTarget`
+ * 还是最初那一份，于是进度被写进旧源/旧集数的历史条目里（再点「继续观看」就跳错）。
+ */
+export class ProgressTarget {
+  sourceKey: string;
+  vodId: string;
+  title: string;
+  cover: string;
+  sourceName: string;
+  episodeCount: number;
+
+  constructor(sourceKey: string, vodId: string, title: string, cover: string, sourceName: string,
+    episodeCount: number) {
+    this.sourceKey = sourceKey;
+    this.vodId = vodId;
+    this.title = title;
+    this.cover = cover;
+    this.sourceName = sourceName;
+    this.episodeCount = episodeCount;
+  }
+}
+
 export class AppModel {
   page: PageId = PageId.Home;
   data: AppData = emptyData();
@@ -114,6 +139,11 @@ export class AppModel {
   livePlaylist: LiveChannel[] = [];
   /** 详情页的返回目标 */
   private backStack: PageId[] = [];
+  /**
+   * 搜索请求序号：连打两次搜索时，先发起的那一轮可能后返回，
+   * 无条件写回就会把新词的结果覆盖成旧词的（状态行与分组都会错）。
+   */
+  private searchSeq: number = 0;
   private storage: Storage = new Storage();
   private started: boolean = false;
   version: number = 0;
@@ -203,6 +233,7 @@ export class AppModel {
     if (wd.length === 0) {
       return;
     }
+    const mySeq = ++this.searchSeq;
     this.search.keyword = wd;
     this.search.loading = true;
     this.search.searched = true;
@@ -215,6 +246,9 @@ export class AppModel {
     try {
       const result = await searchAll(sources, wd, this.data.settings.adultFilter,
         (items: SearchItem[], st: SearchStatus) => {
+          if (mySeq !== this.searchSeq) {
+            return;
+          }
           for (let i = 0; i < items.length; i++) {
             collected.push(items[i]);
           }
@@ -223,12 +257,20 @@ export class AppModel {
           this.search.groups = rankGroups(groupSearchResults(collected), wd);
           this.bump();
         });
+      if (mySeq !== this.searchSeq) {
+        return;
+      }
       this.search.groups = rankGroups(groupSearchResults(result.items), wd);
       this.search.statuses = result.statuses;
     } catch (err) {
-      this.show(describeError(err as Object));
+      if (mySeq === this.searchSeq) {
+        this.show(describeError(err as Object));
+      }
     } finally {
-      this.search.loading = false;
+      // 只有最新一轮才有资格把 loading 关掉：旧轮次结束就关会闪掉新轮次的转圈
+      if (mySeq === this.searchSeq) {
+        this.search.loading = false;
+      }
       this.bump();
     }
   }
@@ -365,26 +407,33 @@ export class AppModel {
 
   // ---------------- 历史与收藏 ----------------
 
-  saveProgress(index: number, positionMs: number, durationMs: number, finished: boolean): void {
-    const t = this.playerTarget;
+  /**
+   * 落播放进度。
+   *
+   * `explicit` 由播放页传入「当前真正在播的源与集数」：换源之后 `playerTarget`
+   * 仍指向最初那一份，只读它会把进度写到旧条目上。
+   */
+  saveProgress(index: number, positionMs: number, durationMs: number, finished: boolean,
+    explicit?: ProgressTarget): void {
+    const t = explicit !== undefined ? explicit : this.readProgressTarget();
     if (t === null || !this.data.settings.resumePlayback) {
       return;
     }
     if (!finished && positionMs <= 0) {
       return;
     }
-    const id = `${t.source.key}:${t.vodId}`;
+    const id = `${t.sourceKey}:${t.vodId}`;
     const effectivePos = finished ? 0 : positionMs;
-    const epIndex = finished ? Math.min(index + 1, t.episodes.length - 1) : index;
+    const epIndex = finished ? Math.min(index + 1, Math.max(0, t.episodeCount - 1)) : index;
     const entry: HistoryEntry = {
       id: id,
-      sourceKey: t.source.key,
+      sourceKey: t.sourceKey,
       vodId: t.vodId,
       title: t.title,
       cover: t.cover.length > 0 ? t.cover : undefined,
       sourceName: t.sourceName,
       episodeIndex: epIndex,
-      episodeCount: t.episodes.length,
+      episodeCount: t.episodeCount,
       positionMs: effectivePos,
       durationMs: durationMs,
       updatedAt: Date.now(),
@@ -397,6 +446,15 @@ export class AppModel {
     }
     this.data.history = list;
     this.persist();
+  }
+
+  /** 没有显式目标时退回 `playerTarget`（首播路径就是这样） */
+  private readProgressTarget(): ProgressTarget | null {
+    const t = this.playerTarget;
+    if (t === null) {
+      return null;
+    }
+    return new ProgressTarget(t.source.key, t.vodId, t.title, t.cover, t.sourceName, t.episodes.length);
   }
 
   resumeFromHistory(entry: HistoryEntry): void {

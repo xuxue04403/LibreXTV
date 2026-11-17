@@ -213,7 +213,7 @@ const quotaSafeStorage = {
 
 export const useAppStore = create<AppState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       settings: DEFAULT_SETTINGS,
       sources: [],
       selectedKeys: [],
@@ -573,19 +573,27 @@ export const useAppStore = create<AppState>()(
         })),
 
       importSources: (incomingVod, incomingLive) => {
-        const state = get();
-        const existingVodUrls = new Set(state.sources.map((s) => s.url));
-        const existingLiveUrls = new Set(state.liveSources.map((s) => s.url));
-        const vod = incomingVod.filter((s) => !existingVodUrls.has(s.url));
-        const live = incomingLive.filter((s) => !existingLiveUrls.has(s.url));
-        if (vod.length === 0 && live.length === 0) return { addedVod: 0, addedLive: 0 };
-        set({
-          sources: [...state.sources, ...vod],
-          selectedKeys: [...new Set([...state.selectedKeys, ...vod.map((s) => s.key)])],
-          liveSources: [...state.liveSources, ...live],
-          liveSelectedKeys: [...new Set([...state.liveSelectedKeys, ...live.map((s) => s.key)])],
+        // 注意必须用**函数式** `set`：订阅同步是并行跑的（`subscription-sync.ts` 起 2 个
+        // worker），若先 `get()` 快照再写回，后完成的那一方会用旧快照覆盖，
+        // 先完成那个订阅新增的源就被静默丢掉了——用户看到「同步成功」但源没进来。
+        let addedVod = 0;
+        let addedLive = 0;
+        set((s) => {
+          const existingVodUrls = new Set(s.sources.map((x) => x.url));
+          const existingLiveUrls = new Set(s.liveSources.map((x) => x.url));
+          const vod = incomingVod.filter((x) => !existingVodUrls.has(x.url));
+          const live = incomingLive.filter((x) => !existingLiveUrls.has(x.url));
+          addedVod = vod.length;
+          addedLive = live.length;
+          if (vod.length === 0 && live.length === 0) return {};
+          return {
+            sources: [...s.sources, ...vod],
+            selectedKeys: [...new Set([...s.selectedKeys, ...vod.map((x) => x.key)])],
+            liveSources: [...s.liveSources, ...live],
+            liveSelectedKeys: [...new Set([...s.liveSelectedKeys, ...live.map((x) => x.key)])],
+          };
         });
-        return { addedVod: vod.length, addedLive: live.length };
+        return { addedVod, addedLive };
       },
 
       clearHistory: () => set({ history: [] }),

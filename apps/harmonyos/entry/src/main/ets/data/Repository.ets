@@ -124,7 +124,16 @@ export async function searchAll(
   const keyword = wd.trim();
   const tasks: Promise<SearchOneResult>[] = [];
   for (let i = 0; i < sources.length; i++) {
-    tasks.push(searchOne(sources[i], keyword, adultFilter));
+    const src = sources[i];
+    const task = withSearchDeadline(searchOne(src, keyword, adultFilter));
+    if (onSource !== undefined) {
+      // 每个源一结算就回调，而不是等 Promise.all 全部返回：
+      // 慢源（或卡住的源）不再拖住其它源的结果，界面才能「边搜边出」。
+      task.then((r: SearchOneResult): void => {
+        onSource(r.items, toStatus(src, r));
+      }).catch((): void => undefined);
+    }
+    tasks.push(task);
   }
   const results = await Promise.all(tasks);
   const all: SearchItem[] = [];
@@ -137,20 +146,42 @@ export async function searchAll(
         all.push(r.items[j]);
       }
     }
-    const st: SearchStatus = {
-      sourceKey: src.key,
-      sourceName: src.name,
-      ok: r.ok,
-      count: r.items.length,
-      error: r.error,
-      ms: r.ms,
-    };
-    statuses.push(st);
-    if (onSource !== undefined) {
-      onSource(r.items, st);
-    }
+    statuses.push(toStatus(src, r));
   }
   return { items: dedupeItems(all), statuses: statuses };
+}
+
+function toStatus(src: VodSource, r: SearchOneResult): SearchStatus {
+  return {
+    sourceKey: src.key,
+    sourceName: src.name,
+    ok: r.ok,
+    count: r.items.length,
+    error: r.error,
+    ms: r.ms,
+  };
+}
+
+/** 单源死线：`SEARCH_TIMEOUT_MS` 之前没返回就按「失败」结算，别让一个源挂住整页 */
+async function withSearchDeadline(task: Promise<SearchOneResult>): Promise<SearchOneResult> {
+  let timer = -1;
+  const deadline: Promise<SearchOneResult> = new Promise<SearchOneResult>((resolve) => {
+    timer = setTimeout(() => {
+      resolve({
+        ok: false,
+        items: [],
+        error: `超过 ${Math.floor(SEARCH_TIMEOUT_MS / 1000)} 秒未返回`,
+        ms: SEARCH_TIMEOUT_MS,
+      });
+    }, SEARCH_TIMEOUT_MS) as number;
+  });
+  try {
+    return await Promise.race([task, deadline]);
+  } finally {
+    if (timer >= 0) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 /** 拉一部影片的详情；接口拿不到分集时降级爬详情页 */

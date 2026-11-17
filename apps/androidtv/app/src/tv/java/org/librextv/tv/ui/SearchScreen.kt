@@ -55,6 +55,17 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
     // 空输入按搜索时给一句提示：startSearch 对空串是静默 return，否则用户不知道发生了什么。
     var emptyHint by remember { mutableStateOf(false) }
     val searchButtonFocus = remember { FocusRequester() }
+    // 边输入边出片名候选：只查本地已见过的条目（零网络），遥控器敲一个字母就见效。
+    // 与按搜索键之后跑的 pinyinSearch 分工不同——那个要去各源翻页补全，慢但要找全。
+    // key 只用 `word`：本地索引随时可能被后台预热补充，但那段更新只在下次输入时体现即可，
+    // 不必把 `data` 塞进 key（那会让每次搜索进度变化都重算一遍候选）。
+    val liveSuggestions = remember(word) {
+        if (word.isEmpty()) emptyList() else vm.suggestTitles(word)
+    }
+    // 出结果后候选要让位给结果，但**不能一隐藏就再也不回来**：原来判的是 `!search.searched`，
+    // 而 `searched` 一次搜索之后就一直是 true，用户清空输入、改成另一个词再敲，
+    // 候选行永远不出现，只能退出搜索页重进。改成「输入与上次真正搜的词不一致才显示」。
+    val showSuggestions = word != search.keyword
     val suggestions = remember(data.history, search.keyword) {
         (search.keyword.takeIf { it.isNotBlank() }?.let { listOf(it) } ?: emptyList()) +
             data.history.map { it.title }.distinct().take(6)
@@ -115,13 +126,28 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
         if (Pinyin.isQuery(word)) {
             Spacer(Modifier.height(10.dp))
             Text(
-                "按拼音首字母检索：$word → 「奇妙萌可」这类片名（只匹配本地已见过的条目和各源最新列表）",
+                "按拼音首字母检索：$word → 「奇妙萌可」这类片名（本地已见过的条目 + 各源最新列表 + 量子/暴风的服务端拼音检索）",
                 color = Accent,
                 fontSize = MaterialTheme.typography.bodySmall.fontSize,
             )
         }
 
-        if (suggestions.isNotEmpty() && !search.searched) {
+        // 实时片名候选：边输入边出，点一下就填词并搜。放在「最近搜索」之前——
+        // 用户正在敲字时最需要的正是这个，历史记录是没敲字时的兜底。
+        if (liveSuggestions.isNotEmpty() && showSuggestions) {
+            Spacer(Modifier.height(14.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                item { Text("片名：", color = TextMuted, fontSize = MaterialTheme.typography.bodySmall.fontSize) }
+                items(liveSuggestions) { item ->
+                    Chip(item.name) {
+                        input = TextFieldValue(item.name, TextRange(item.name.length))
+                        vm.startSearch(item.name)
+                    }
+                }
+            }
+        }
+
+        if (suggestions.isNotEmpty() && showSuggestions) {
             Spacer(Modifier.height(14.dp))
             // 用 LazyRow 而不是 Row：建议词一多，后面的胶囊被裁在屏幕外，
             // 但焦点仍能移过去（看不见焦点框），遥控器使用者会以为卡住了。

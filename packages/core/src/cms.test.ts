@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cmsUrl,
   extractEpisodesFromPlayUrl,
   filterAdultResults,
   filterRelevantResults,
   isRelevant,
+  isSameShow,
   normalizeTitle,
   parseDetail,
   parseSearchList,
@@ -43,6 +45,24 @@ describe('parseSearchList', () => {
   });
 });
 
+describe('cmsUrl', () => {
+  it('普通源用 ? 起头，并丢掉尾部斜杠', () => {
+    expect(cmsUrl('https://x.com/api.php/provide/vod/', { ac: 'videolist', pg: 1 })).toBe(
+      'https://x.com/api.php/provide/vod?ac=videolist&pg=1'
+    );
+  });
+
+  it('源地址已带查询串时用 & 追加，不能让 wd 退化成一个参数值', () => {
+    expect(cmsUrl('https://x.com/api.php?key=abc', { ac: 'videolist', wd: '斗罗', pg: 2 })).toBe(
+      `https://x.com/api.php?key=abc&ac=videolist&wd=${encodeURIComponent('斗罗')}&pg=2`
+    );
+  });
+
+  it('参数值一律编码', () => {
+    expect(cmsUrl('https://x.com/vod', { wd: 'a&b=c' })).toBe('https://x.com/vod?wd=a%26b%3Dc');
+  });
+});
+
 describe('extractEpisodesFromPlayUrl', () => {
   it('优先选包含 m3u8 的线路', () => {
     const playUrl =
@@ -60,6 +80,23 @@ describe('extractEpisodesFromPlayUrl', () => {
 
   it('空输入返回空数组', () => {
     expect(extractEpisodesFromPlayUrl('')).toEqual([]);
+  });
+
+  it('URL 自身含 $ 时只按第一个 $ 切，不把地址截断', () => {
+    const playUrl = '第1集$https://cdn.x.com/a/index.m3u8$sign=abc';
+    expect(extractEpisodesFromPlayUrl(playUrl)).toEqual(['https://cdn.x.com/a/index.m3u8$sign=abc']);
+  });
+
+  it('保留 m3u8 的签名查询参数（丢了签名就是 403）', () => {
+    const playUrl = '第1集$https://cdn.x.com/a/index.m3u8?token=xyz&expires=123';
+    expect(extractEpisodesFromPlayUrl(playUrl)).toEqual([
+      'https://cdn.x.com/a/index.m3u8?token=xyz&expires=123',
+    ]);
+  });
+
+  it('整集只给裸 URL、没有「集名$」前缀时也能取到', () => {
+    const playUrl = '第1集$https://x.com/a.mp4#https://x.com/b.mp4';
+    expect(extractEpisodesFromPlayUrl(playUrl)).toEqual(['https://x.com/a.mp4', 'https://x.com/b.mp4']);
   });
 });
 
@@ -124,5 +161,36 @@ describe('成人内容过滤', () => {
     const items = [{ typeName: '伦理片' }, { typeName: '科幻片' }];
     expect(filterAdultResults(items, true)).toEqual([{ typeName: '科幻片' }]);
     expect(filterAdultResults(items, false)).toHaveLength(2);
+  });
+});
+
+describe('isSameShow（同一部剧的判定）', () => {
+  it('同名与标点差异算同一部', () => {
+    expect(isSameShow('庆余年', '庆余年')).toBe(true);
+    expect(isSameShow('庆余年 第一季', '庆余年')).toBe(true);
+    expect(isSameShow('The.Last.of.Us', 'the last of us')).toBe(true);
+  });
+
+  it('续集不算同一部', () => {
+    // 这是自动换源最致命的误判：季数不同时换过去会播成另一部剧
+    expect(isSameShow('庆余年 第二季', '庆余年')).toBe(false);
+    expect(isSameShow('庆余年2', '庆余年')).toBe(false);
+    expect(isSameShow('庆余年', '庆余年 第二季')).toBe(false);
+  });
+
+  it('片名后面紧跟的数字视为续集', () => {
+    expect(isSameShow('流浪地球2 国语', '流浪地球')).toBe(false);
+    expect(isSameShow('流浪地球', '流浪地球2')).toBe(false);
+  });
+
+  it('带说明的后缀仍算同一部', () => {
+    expect(isSameShow('庆余年 第二季 4K', '庆余年 第二季')).toBe(true);
+    expect(isSameShow('繁花(2024) 全集', '繁花')).toBe(true);
+  });
+
+  it('不同的剧不算同一部', () => {
+    expect(isSameShow('庆余年', '繁花')).toBe(false);
+    expect(isSameShow('三体', '三体 第二季')).toBe(false);
+    expect(isSameShow('', '庆余年')).toBe(false);
   });
 });

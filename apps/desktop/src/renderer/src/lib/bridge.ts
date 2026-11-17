@@ -70,23 +70,32 @@ export const http: HttpClient = {
     });
     // 主进程的 http:fetch 没有取消通道，但渲染层不该陪着等：
     // 搜索/分类切走之后旧请求要立刻放掉，否则「点了就走」的体验会被一条慢源拖住。
-    const res = options.signal
-      ? await Promise.race([
-          pending,
-          new Promise<never>((_, reject) => {
-            options.signal?.addEventListener('abort', () => reject(new Error('请求已取消')), { once: true });
-          }),
-        ])
-      : await pending;
-    if (res.status === 0) throw new Error(res.error || '网络请求失败');
-    return {
-      ok: res.ok,
-      status: res.status,
-      url: res.url,
-      headers: res.headers,
-      bytes: res.bytes,
-      text: res.text,
-    };
+    const { signal } = options;
+    let onAbort: (() => void) | undefined;
+    try {
+      const res = signal
+        ? await Promise.race([
+            pending,
+            new Promise<never>((_, reject) => {
+              onAbort = () => reject(new Error('请求已取消'));
+              signal.addEventListener('abort', onAbort, { once: true });
+            }),
+          ])
+        : await pending;
+      if (res.status === 0) throw new Error(res.error || '网络请求失败');
+      return {
+        ok: res.ok,
+        status: res.status,
+        url: res.url,
+        headers: res.headers,
+        bytes: res.bytes,
+        text: res.text,
+      };
+    } finally {
+      // 同一个 controller 会被整页的多次请求复用：不摘监听器的话，
+      // 监听器（及其闭包）随请求数线性累积，长会话里泄漏。
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+    }
   },
 
   /**

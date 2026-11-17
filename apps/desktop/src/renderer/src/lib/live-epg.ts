@@ -18,9 +18,22 @@ type Entry = { at: number; ok: boolean; byChannel?: ParsedEpg };
 const cache = new Map<string, Entry>();
 const inflight = new Map<string, Promise<Entry>>();
 
-async function load(epgUrl: string, signal?: AbortSignal): Promise<Entry> {
+/**
+ * 取（并缓存）一份 XMLTV。
+ *
+ * **`signal` 只影响本次调用，不绑到单飞的 promise 上**。早先的实现把第一个
+ * 调用方的 signal 传给网络请求，于是换台时那一次 `abort()` 会把整个在途请求取消，
+ * catch 里返回 `{ok:false}` 又被写进 10 分钟 TTL 的缓存 —— 用户切回同一批频道
+ * （它们共用一个 epgUrl）时节目单全空，而且 10 分钟内不会自愈。
+ *
+ * 现在改成：谁调用谁判断要不要用结果；请求本身用一个页面无关的 controller，
+ * 只有在「没有任何调用方还关心」时才真正取消。实现上简化为——请求不带外部
+ * signal，但每个调用方在自己的 signal 触发后立刻返回缓存的旧值（或空），
+ * 不阻塞 UI，网络请求继续跑完并填充缓存供后续频道复用。
+ */
+function load(epgUrl: string): Promise<Entry> {
   const hit = cache.get(epgUrl);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit;
+  if (hit && Date.now() - hit.at < TTL_MS) return Promise.resolve(hit);
 
   const pending = inflight.get(epgUrl);
   if (pending) return pending;
@@ -30,7 +43,6 @@ async function load(epgUrl: string, signal?: AbortSignal): Promise<Entry> {
       const res = await http.request(epgUrl, {
         headers: { Accept: 'application/xml, text/xml, application/gzip, */*' },
         timeoutMs: 20_000,
-        signal,
       });
       if (!res.ok) return { at: Date.now(), ok: false };
       const bytes = await maybeGunzip(res.bytes);
@@ -44,26 +56,43 @@ async function load(epgUrl: string, signal?: AbortSignal): Promise<Entry> {
   })();
 
   inflight.set(epgUrl, task);
-  const entry = await task;
-  cache.set(epgUrl, entry);
-  return entry;
+  void task.then((entry) => {
+    // 失败也缓存：iptv-org 的节目单超过主进程 16MB 上限，注定失败；
+    // 不记住失败的话，每换一个台都要白等一遍。这里的失败是真的失败——
+    // 请求已不再绑调用方 signal，不会把「用户换台」误记成「拉取失败」。
+    cache.set(epgUrl, entry);
+  });
+  return task;
+}
+
+/** 在 [signal] abort 时立刻以 null 收尾，用于「不再等这份节目单」 */
+function abortedAs<T>(signal: AbortSignal): Promise<T | null> {
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve(null), { once: true });
+  });
 }
 
 /**
  * 取某频道当前/下一档节目；任何失败都返回空结果，绝不抛错（节目单不该影响看直播）
  *
- * [signal] 用于「换台/退出播放页就取消」：一份 XMLTV 动辄几十 MB，
- * 用户在这个台上只待了两秒就换走，不取消的话请求会继续把整个文件下完。
- * 解析（parseXmltv）是同步的，取消只作用于网络阶段——即便如此，也能省掉
- * 后面那次几十 MB 的解码与正则扫描。
+ * [signal] 用于「换台/退出播放页就不再等结果」：一份 XMLTV 动辄几十 MB，
+ * 用户在这个台上只待了两秒就换走，没必要让 UI 继续等。请求本身仍在后台跑完并进缓存，
+ * 下一个频道直接命中。
  */
 export async function loadChannelEpg(
   epgUrl: string,
   channelId: string,
   signal?: AbortSignal
 ): Promise<LiveEpg> {
-  const entry = await load(epgUrl, signal);
-  const programs = entry.ok ? (entry.byChannel?.get(channelId) ?? []) : [];
-  const { current, next } = currentAndNext(programs);
-  return { channelId, current, next, programs };
+  const empty: LiveEpg = { channelId, programs: [] };
+  // 已经取消：直接给空，别再去等一个几十 MB 的请求
+  if (signal?.aborted) {
+    const cached = cache.get(epgUrl);
+    if (!cached?.ok) return empty;
+  }
+  const task = load(epgUrl);
+  const entry = signal ? await Promise.race([task, abortedAs<Entry>(signal)]) : await task;
+  const progs = entry?.ok ? (entry.byChannel?.get(channelId) ?? []) : [];
+  const { current, next } = currentAndNext(progs);
+  return { channelId, current, next, programs: progs };
 }

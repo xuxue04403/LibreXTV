@@ -10,10 +10,13 @@ import {
   findSkipTarget,
   formatTime,
   historyId,
+  initialStallState,
+  nextStallState,
   pickEpisodeIndex,
   skipMarkKey,
   type PlaybackCandidate,
   type SkipMarks,
+  type StallState,
 } from '@librextv/core';
 import { http, prefetchSegments, proxify } from '../lib/bridge';
 import { attachVolumeBoost, type VolumeBoostHandle } from '../lib/volume-boost';
@@ -43,8 +46,18 @@ const DOUBLE_DOWN_MS = 700;
 const MAX_RECOVERIES = 2;
 /** 同一集内允许的 hls.js 就地媒体恢复次数（recoverMediaError 有内部状态，次数要单独记） */
 const MAX_MEDIA_RECOVERIES = 2;
-/** 连续缓冲多久判定为「卡死」，触发换源（毫秒） */
-const STALL_MS = 12_000;
+/** 同一集内允许的 hls.js 网络错误就地续传次数（startLoad 比换源便宜得多） */
+const MAX_NETWORK_RECOVERIES = 2;
+/**
+ * 缓冲看门狗的采样间隔（毫秒）。
+ *
+ * 判定本身交给 core 的 `nextStallState`：跳转中不算卡死，缓冲/位置有进展也不算，
+ * 只有「既没跳转又完全没有进展」持续满 `STALL_FATAL_MS` 才换源。
+ * 连续快进时会不断 seek，因此这里几乎永远判不到 fatal。
+ */
+const STALL_POLL_MS = 3_000;
+/** 跳转本身卡住的兜底窗口（毫秒）：连 seek 都完不成就说明数据一点都取不到 */
+const SEEK_FATAL_MS = 60_000;
 
 export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: () => void }) {
   const settings = useAppStore((s) => s.settings);
@@ -63,6 +76,12 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
   const recoverRef = useRef(0);
   /** 本集已用掉的 hls.js 就地媒体恢复次数（与整集重载配额分开记） */
   const mediaRecoverRef = useRef(0);
+  /** 本集已用掉的 hls.js 网络错误续传次数 */
+  const networkRecoverRef = useRef(0);
+  /** 缓冲看门狗状态（是否跳转、缓冲有没有前进都在这里判） */
+  const stallStateRef = useRef<StallState>(initialStallState);
+  /** 「网络较慢，仍在缓冲」这类软提示：只安慰用户，不换源 */
+  const [stallHint, setStallHint] = useState<string | null>(null);
   /** 已经发过预取的地址：effect 会因错误恢复重跑，同一条不必再抢一次带宽 */
   const prefetchedRef = useRef<string | null>(null);
   /**
@@ -102,6 +121,7 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [buffered, setBuffered] = useState(0);
+  const [dragRatio, setDragRatio] = useState<number | null>(null);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const [rate, setRate] = useState(1);
@@ -127,6 +147,8 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
   const skipHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Shift+S 记下的中段起点，等 Shift+E 收尾 */
   const midStartRef = useRef<number | null>(null);
+  /** 进度条拖拽时挂在 window 上的监听，卸载/退出时要摘掉 */
+  const dragRef = useRef<(() => void) | null>(null);
   /** 跳过标记面板（标记列表 / 按剧开关 / 清除） */
   const [skipPanelOpen, setSkipPanelOpen] = useState(false);
   const marks = useAppStore((s) => s.skipMarks[skipKey]);
@@ -266,6 +288,7 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
   useEffect(() => {
     recoverRef.current = 0;
     mediaRecoverRef.current = 0;
+    networkRecoverRef.current = 0;
   }, [episodeUrl, active]);
 
   useEffect(() => {
@@ -320,17 +343,24 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
           maxMaxBufferLength: 90,
           backBufferLength: 30,
           maxBufferSize: 60 * 1000 * 1000,
-          // 分片失败快速失败并交给换源，而不是无限 startLoad 卡住
-          manifestLoadingMaxRetry: 1,
-          levelLoadingMaxRetry: 2,
-          fragLoadingMaxRetry: 2,
-          fragLoadingRetryDelay: 500,
+          // 分片失败先就地重试几次，再交给换源：连续快进时在途分片会被主动丢弃，
+          // 2 次重试、间隔 500ms 太紧，正常源也会被判成网络错误。
+          manifestLoadingMaxRetry: 3,
+          levelLoadingMaxRetry: 3,
+          fragLoadingMaxRetry: 4,
+          fragLoadingRetryDelay: 800,
           startLevel: -1,
         });
         hls.loadSource(src);
         hls.attachMedia(video);
         hls.on(Hls.Events.ERROR, (_evt, data) => {
           if (!data.fatal) return;
+          // hls.js 自己主动中止在途加载（快进换位时会大量出现）不是源的问题
+          if (data.details === Hls.ErrorDetails.INTERNAL_ABORTED) return;
+          // 跳转中报出来的致命网络错误不能算源失效：这时在途分片本来就会被反复
+          // 丢弃重取，直接换源等于把能播的源换掉（用户反馈的正是这件事）。改成
+          // 就地续传，并且不消耗「本集可续传次数」的配额。
+          const seeking = video.seeking;
           if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
             // 解码类致命错误有官方就地恢复手段 recoverMediaError()：它会在
             // 同一个 Hls 实例上重建 MediaSource 并保留已缓冲的清单与分片。
@@ -352,6 +382,21 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
             return;
           }
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            // 致命网络错误通常还能就地救：`startLoad()` 让 hls.js 从当前位置重新
+            // 开始取分片，清单、已缓冲内容全部保留。比整集重载便宜，更比换源便宜，
+            // 而多数「分片超时」本身只是抖动，重新取就回来了。
+            // 跳转中不设次数上限：此时次数容易被连续快进迅速耗光，从而误判整源失效。
+            if (hls && (seeking || networkRecoverRef.current < MAX_NETWORK_RECOVERIES)) {
+              if (!seeking) networkRecoverRef.current += 1;
+              try {
+                hls.startLoad();
+                setError(null);
+                setLoading(true);
+                return;
+              } catch {
+                /* 续传失败就落到换源 */
+              }
+            }
             handleFatal('网络错误：分片加载失败');
             return;
           }
@@ -496,6 +541,74 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
         clearTimeout(stallTimer.current);
         stallTimer.current = null;
       }
+      stallStateRef.current = initialStallState;
+      setStallHint(null);
+    };
+    /** 已缓冲到的位置；没有缓冲时按当前播放位置算 */
+    const bufferedEnd = () =>
+      video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0;
+    /** 本轮跳转的起点（ms）；0 表示当前没在跳转 */
+    let seekSince = 0;
+    /**
+     * 起一个采样定时器。
+     *
+     * 判定全部交给 core 的 `nextStallState`：跳转中、或者缓冲/位置有进展，都只
+     * 会让它「重新计时」，绝不会换来换源。只有连续 `STALL_FATAL_MS` 毫无进展，
+     * 才说明这个源确实什么都取不到。
+     */
+    const scheduleStallCheck = () => {
+      if (stallTimer.current) clearTimeout(stallTimer.current);
+      stallTimer.current = setTimeout(() => {
+        stallTimer.current = null;
+        const outcome = nextStallState(stallStateRef.current, {
+          at: Date.now(),
+          currentTime: video.currentTime,
+          bufferedEnd: bufferedEnd(),
+          seeking: video.seeking,
+          paused: video.paused,
+        });
+        stallStateRef.current = outcome.state;
+        switch (outcome.verdict) {
+          case 'reset': {
+            setStallHint(null);
+            // 暂停：没有后续事件可等，停表
+            if (video.paused) {
+              seekSince = 0;
+              return;
+            }
+            if (video.seeking) {
+              if (!seekSince) seekSince = Date.now();
+              // 跳转本身也可能是「卡死在跳转中」：数据一个都取不到时 seek 永远
+              // 完不成，不会再等到 waiting。这里给一个更长的兜底窗口。
+              if (Date.now() - seekSince > SEEK_FATAL_MS) {
+                setLoading(false);
+                setError('加载超时');
+                void failover('跳转后无数据');
+                return;
+              }
+              scheduleStallCheck();
+              return;
+            }
+            seekSince = 0;
+            scheduleStallCheck();
+            return;
+          }
+          case 'hint':
+            // 只提示，绝不换源：慢不等于源坏了
+            setStallHint('网络较慢，仍在缓冲…');
+            scheduleStallCheck();
+            return;
+          case 'fatal':
+            // 到这里是真的连续几十秒一个字节都没进来，才认定这个源不可用
+            setStallHint(null);
+            setLoading(false);
+            setError('加载超时');
+            void failover('连续无数据');
+            return;
+          default:
+            scheduleStallCheck();
+        }
+      }, STALL_POLL_MS);
     };
     const onPause = () => {
       setPlaying(false);
@@ -515,21 +628,35 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
         setIndex((i) => i + 1);
       }
     };
-    // 一直卡在 buffering 超过 STALL_MS 也要换源，否则用户只能看到无限转圈
+    /**
+     * 缓冲中：起看门狗。
+     *
+     * 旧实现是「buffering 满 12 秒直接换源」，连续快进时必然误判——每次 seek
+     * 都会先丢弃在途分片、再按新位置重新取数据，12 秒里没有任何进展完全正常。
+     * 现在跳转期间只计时不判死，有进展就重新计时，只有长时间零进展才换源。
+     */
     const onWaiting = () => {
-      // 暂停状态下的 seeking 也会派发 waiting，这种情况不该判成卡死
+      // 暂停时本来就没有数据要等；暂停状态下的 seeking 也会派发 waiting
       if (video.paused) return;
       setLoading(true);
       clearStall();
-      stallTimer.current = setTimeout(() => {
-        setLoading(false);
-        setError('加载超时');
-        void failover('加载超时');
-      }, STALL_MS);
+      scheduleStallCheck();
     };
     const onPlaying = () => {
       setLoading(false);
       clearStall();
+      seekSince = 0;
+    };
+    const onSeeking = () => {
+      seekSince = Date.now();
+    };
+    // 跳转结束：播放器已经按新位置重新取数据，从这里重新开始计时
+    const onSeeked = () => {
+      seekSince = 0;
+      if (video.paused) return;
+      setLoading(true);
+      clearStall();
+      scheduleStallCheck();
     };
     video.addEventListener('timeupdate', onTime);
     video.addEventListener('play', onPlay);
@@ -538,6 +665,8 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
     video.addEventListener('ended', onEnded);
     video.addEventListener('waiting', onWaiting);
     video.addEventListener('playing', onPlaying);
+    video.addEventListener('seeking', onSeeking);
+    video.addEventListener('seeked', onSeeked);
     return () => {
       clearStall();
       video.removeEventListener('timeupdate', onTime);
@@ -547,6 +676,8 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
       video.removeEventListener('ended', onEnded);
       video.removeEventListener('waiting', onWaiting);
       video.removeEventListener('playing', onPlaying);
+      video.removeEventListener('seeking', onSeeking);
+      video.removeEventListener('seeked', onSeeked);
     };
   }, [episodes.length, failover, index, persistProgress, settings.autoSkip, settings.autoplayNext, skipKey]);
 
@@ -666,6 +797,15 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
   //
   // 但如果进播放页之前窗口就已经全屏（用户自己按 F11 或系统记忆的窗口状态），
   // 那就不是「播放页开的」，不能替他退出去。
+
+  useEffect(
+    () => () => {
+      // 拖进度条时按 Esc 退出播放页：不摘监听的话这两个 window 监听会永久残留，
+      // 闭包还持有整个 Watch 组件树（播放器、HLS 实例都在里面）。
+      dragRef.current?.();
+    },
+    []
+  );
 
   useEffect(
     () => () => {
@@ -824,6 +964,8 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
 
   const playedPercent = duration > 0 ? (current / duration) * 100 : 0;
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0;
+  // 拖动进度条时的草稿位置（0~1）：只更新界面，松手才真正 seek 一次
+  const shownPercent = dragRatio !== null ? dragRatio * 100 : playedPercent;
   /** 进度条上的跳过区间色带：片头/片尾琥珀色，中段青色 */
   const skipBands = (() => {
     if (!marks || duration <= 0) return [] as { start: number; end: number; kind: string }[];
@@ -859,7 +1001,13 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
     <div
       className="player-page"
       onMouseMove={revealControls}
-      onDoubleClick={() => void toggleFullscreen()}
+      onDoubleClick={(event) => {
+        // 双击全屏只对画面生效：进度条（用户习惯双击快速定位）、按钮、抽屉里的
+        // 双击不该顺带切窗口全屏——那会让布局和控件重新排布。
+        const target = event.target as HTMLElement | null;
+        if (target?.closest('button, input, .progress, .player-controls, .drawer, .skip-hint, .player-loading')) return;
+        void toggleFullscreen();
+      }}
     >
       <div className="player-stage">
         <video
@@ -878,6 +1026,7 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
           <div className="player-loading">
             <div className="spinner" />
             <div>正在加载 {episodeLabel(index)}…</div>
+            {stallHint && <div style={{ marginTop: 8, color: '#8d97a8', fontSize: 12 }}>{stallHint}</div>}
           </div>
         )}
         {failoverNote && (
@@ -888,7 +1037,7 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
           </div>
         )}
         {error && (
-          <div className="player-loading">
+          <div className="player-loading player-error">
             <div style={{ maxWidth: 480, textAlign: 'center', lineHeight: 1.7 }}>
               <div style={{ fontSize: 15, marginBottom: 6 }}>{error}</div>
               <div style={{ color: '#8d97a8', fontSize: 12 }}>
@@ -916,6 +1065,7 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
                     discoveredRef.current = false;
                     recoverRef.current = 0;
                     mediaRecoverRef.current = 0;
+                    networkRecoverRef.current = 0;
                     setReloadToken((token) => token + 1);
                   }}
                 >
@@ -971,18 +1121,38 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
             className="progress"
             onMouseDown={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              seekToRatio((e.clientX - rect.left) / rect.width);
-              const onMove = (ev: MouseEvent) => seekToRatio((ev.clientX - rect.left) / rect.width);
-              const onUp = () => {
+              const ratioAt = (clientX: number) => Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+              // 拖动中只更新草稿位置，**松手才 seek 一次**。
+              // 每帧都写 video.currentTime 会让 hls 不停丢弃在途分片并重新发请求，
+              // 松手瞬间压着一串刚中止的请求，「拖完停几秒才出画面」就是这么来的。
+              let latest = ratioAt(e.clientX);
+              setDragRatio(latest);
+              const onMove = (ev: MouseEvent) => {
+                latest = ratioAt(ev.clientX);
+                setDragRatio(latest);
+              };
+              const cleanup = () => {
                 window.removeEventListener('mousemove', onMove);
                 window.removeEventListener('mouseup', onUp);
+                dragRef.current = null;
+              };
+              const onUp = () => {
+                cleanup();
+                seekToRatio(latest);
+                setDragRatio(null);
+              };
+              // 拖到一半被打断（换集/卸载）时不能丢掉草稿态
+              dragRef.current?.();
+              dragRef.current = () => {
+                cleanup();
+                setDragRatio(null);
               };
               window.addEventListener('mousemove', onMove);
               window.addEventListener('mouseup', onUp);
             }}
           >
             <div className="buffered" style={{ width: `${bufferedPercent}%` }} />
-            <div className="played" style={{ width: `${playedPercent}%` }} />
+            <div className="played" style={{ width: `${shownPercent}%` }} />
             {skipBands.map((band, i) => (
               <div
                 key={`${band.kind}-${i}`}
@@ -993,7 +1163,7 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
                 }}
               />
             ))}
-            <div className="knob" style={{ left: `${playedPercent}%` }} />
+            <div className="knob" style={{ left: `${shownPercent}%` }} />
           </div>
           <div className="controls-row">
             <button className="ctrl" onClick={togglePlay} title="播放/暂停（空格）">
@@ -1086,7 +1256,11 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
                       title={tried && !isCurrent ? '这一集已经试过，失败了' : '切换到这个片源'}
                       onClick={async () => {
                         if (isCurrent) return;
-                        const parsed = await fetchDetail(candidate.source, candidate.vodId, http, { timeoutMs: 8_000 });
+                        // 带 signal：请求未返回时退出播放页，回调不再 setState 到已卸载的组件
+                        const parsed = await fetchDetail(candidate.source, candidate.vodId, http, {
+                          timeoutMs: 8_000,
+                          signal: abortRef.current?.signal,
+                        });
                         if (parsed.episodes.length === 0) {
                           toast.err('该片源暂无可用地址');
                           return;

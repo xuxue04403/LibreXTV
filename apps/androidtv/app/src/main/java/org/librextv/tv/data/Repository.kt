@@ -45,6 +45,21 @@ private const val PINYIN_WARM_PAGES = 20
 private const val PINYIN_WARM_BUDGET_MS = 60_000L
 
 /**
+ * 支持「服务端拼音检索」的源。
+ *
+ * 绝大多数采集站把 `wd=abc` 当英文关键词（百度搜索 `dl` 返回 `DeadlySecret`），
+ * 但实测**量子资源与暴风资源**会按拼音首字母匹配中文片名：`wd=dldl` 返回
+ * 「斗罗大陆2：绝世唐门」、`wd=qyn` 返回「庆余年 第一季」。
+ *
+ * 这是本地索引兜不住的那部分老片（实测非凡翻到第 300 页、6000 条里也找不到
+ * 庆余年/三体/甄嬛传/流浪地球）的唯一补全手段，所以检索时并行打这两个源。
+ *
+ * 判据是「传首字母能召回中文片名」，不是「有返回」——加新源前先手测：
+ * `curl "<base>?ac=videolist&wd=qyn"` 看返回的 `vod_name` 是不是庆余年。
+ */
+private val REMOTE_PINYIN_MATCHERS = listOf("lziapi.com", "bfzyapi.com")
+
+/**
  * 业务仓库：把「抓取 + 解析」封装成挂起函数。
  * 桌面端由 packages/core 承担同一职责，两端行为保持一致。
  */
@@ -69,6 +84,42 @@ class Repository(private val net: Net = Net) {
 
     /** 当前已见过的条目快照（拼音索引持久化用）：按插入顺序，最近的在后 */
     fun seenSnapshot(): List<SearchItem> = synchronized(seenLock) { seenItems.values.toList() }
+
+    /**
+     * 输入即出的片名建议（**零网络**，遥控器敲一个字母就能看到候选）。
+     *
+     * 与 [pinyinSearch] 的分工：那个是「按了搜索键之后去各源翻页补全」，慢但要找全；
+     * 这个是「边输入边给候选」，只查本地已见过的条目（首页分类 + 历次搜索 + 预热索引），
+     * 所以必须快——直接把同步的本地过滤做完，一行网络请求都不发。
+     *
+     * 匹配规则与 [Pinyin.matches] 一致（首字母串连续命中），另把中文/英文关键词也算进来：
+     * 用户在电视上也可能输 `斗罗` 或 `dou`。
+     *
+     * @param limit 最多返回多少条（遥控器翻一屏 8~12 条就够）
+     */
+    fun suggestTitles(query: String, limit: Int = 12): List<SearchItem> {
+        val word = query.trim().lowercase()
+        if (word.isEmpty()) return emptyList()
+        val snapshot = seenSnapshot()
+        if (snapshot.isEmpty()) return emptyList()
+        val byPinyin = Pinyin.isQuery(word)
+        return snapshot
+            .asSequence()
+            .filter { item ->
+                // 标题包含（中文/英文都走这条）或首字母命中，任一条成立就算候选
+                item.name.lowercase().contains(word) || (byPinyin && Pinyin.matches(item.name, word))
+            }
+            // 同一部片跨源只留一条：建议行点下去只用来填词，不需要每个源一行
+            .distinctBy { it.name }
+            .sortedWith(
+                compareByDescending<SearchItem> { Pinyin.score(it.name, word) }
+                    .thenByDescending { it.name.length <= word.length + 6 }
+                    .thenBy { it.name.length }
+                    .thenBy { it.name },
+            )
+            .take(limit)
+            .toList()
+    }
 
     fun rememberItems(items: List<SearchItem>) {
         synchronized(seenLock) {
@@ -528,6 +579,7 @@ class Repository(private val net: Net = Net) {
         onProgress: ((pagesScanned: Int, hits: List<SearchItem>) -> Unit)? = null,
     ): List<SearchItem> {
         if (!Pinyin.ready || !Pinyin.isQuery(query)) return emptyList()
+        val needle = query.trim().lowercase()
         val cached = synchronized(seenLock) { seenItems.values.filter { Pinyin.matches(it.name, query) } }
         // 本地索引命中时先把结果推给界面（零网络、首帧即出），
         // 但不再像以前那样「有 1 条就完全不打网络」——1 条命中就停会漏掉
@@ -539,6 +591,53 @@ class Repository(private val net: Net = Net) {
         }
         val effectiveBudget =
             if (cachedRanked.isEmpty()) budgetMs else minOf(budgetMs, PINYIN_ENRICH_BUDGET_MS)
+
+        // 远端拼音源先并发打一遍：量子/暴风支持按首字母召回中文片名，
+        // 这是本地索引兜不住的老片（庆余年/三体/流浪地球…）唯一能补到的路径。
+        // 只在查询至少两个字母时打：一个字母的命中太散，纯粹浪费额度。
+        val remote = java.util.Collections.synchronizedList(ArrayList<SearchItem>())
+        if (needle.length >= 2) {
+            val remoteSources = sources.filter { source ->
+                val url = source.url.lowercase()
+                REMOTE_PINYIN_MATCHERS.any { url.contains(it) }
+            }
+            if (remoteSources.isNotEmpty()) {
+                val gate = Semaphore(remoteSources.size.coerceAtLeast(1))
+                coroutineScope {
+                    remoteSources
+                        .map { source ->
+                            async {
+                                withTimeoutOrNull(PINYIN_PAGE_TIMEOUT_MS) {
+                                    gate.withPermit {
+                                        catchingIo {
+                                            val base = source.url.trimEnd('/')
+                                            val encoded = URLEncoder.encode(needle, "UTF-8")
+                                            val text = net.getText("$base?ac=videolist&wd=$encoded&pg=1")
+                                            val parsed = Parsers.parseSearchList(text, source)
+                                            // 服务端是按拼音做的模糊匹配，会混进同音噪声
+                                            // （`wd=dl` 在量子返回「两个人的车站」），
+                                            // 所以必须用首字母二次校验。
+                                            val hits = parsed.filter { Pinyin.matches(it.name, needle) }
+                                            if (hits.isNotEmpty()) {
+                                                remote.addAll(hits)
+                                                rememberItems(hits)
+                                            }
+                                        }.getOrNull()
+                                    }
+                                }
+                            }
+                        }
+                        .awaitAll()
+                }
+                val remoteRanked = rankPinyin(Parsers.filterAdult(remote.toList(), adultFilter), query)
+                // 远端结果先推一帧：本地索引在冷启动时常常是空的，
+                // 让用户等翻完 24 页最新列表才看到第一条是最糟的体验。
+                if (remoteRanked.isNotEmpty()) onProgress?.invoke(0, remoteRanked)
+                if (remoteRanked.size >= PINYIN_ENOUGH_HITS) {
+                    return rankPinyin(Parsers.filterAdult(remoteRanked + cached, adultFilter), query)
+                }
+            }
+        }
 
         // 扫描策略：源内滑动窗口并发 + 扫描专用限流。
         //
@@ -612,7 +711,7 @@ class Repository(private val net: Net = Net) {
                 .awaitAll()
         }
 
-        return rankPinyin(Parsers.filterAdult(found.toList() + cached, adultFilter), query)
+        return rankPinyin(Parsers.filterAdult(found.toList() + remote.toList() + cached, adultFilter), query)
     }
 
     /**

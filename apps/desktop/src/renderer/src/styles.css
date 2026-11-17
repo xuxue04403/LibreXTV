@@ -768,6 +768,17 @@ textarea.input {
   gap: 12px;
   pointer-events: none;
 }
+/*
+ * 错误面板要能点。
+ * `pointer-events` 是**继承**属性：`.player-loading` 上的 none 会一路传给里面的
+ * 按钮，点击穿透到下面的 <video onClick={togglePlay}>，于是「重试」「换一个片源」
+ * 永远点不动（而「重试」没有键盘替代，用户就再也回不来了）。
+ */
+.player-loading.player-error {
+  pointer-events: auto;
+  background: rgba(8, 10, 14, 0.82);
+  backdrop-filter: blur(2px);
+}
 /* 自动跳过片头/片尾后的撤销条：不挡画面，8 秒后自行消失 */
 .skip-hint {
   position: absolute;
@@ -1224,4 +1235,232 @@ textarea.input {
   width: 100%;
   height: 100%;
   background: #000;
+}
+
+/* ---------------------------------------------------------------------------
+   TVBox 式搜索页：左栏字母键盘 + 右栏实时建议
+   --------------------------------------------------------------------------- */
+
+.search-split {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  .search-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 左栏：键盘 */
+
+.kbd {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+}
+
+.kbd-display .input {
+  width: 100%;
+  font-size: 17px;
+  letter-spacing: 2px;
+  text-transform: lowercase;
+}
+
+.kbd-actions,
+.kbd-row {
+  display: flex;
+  gap: 6px;
+}
+
+.kbd-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 38px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  transition: background 0.12s, border-color 0.12s, transform 0.06s;
+}
+
+.kbd-btn:hover {
+  background: #202634;
+  border-color: #2f3849;
+}
+
+.kbd-btn:active {
+  transform: translateY(1px);
+}
+
+.kbd-btn.narrow {
+  font-size: 13px;
+  height: 34px;
+}
+
+.kbd-btn.wide {
+  font-size: 12.5px;
+  height: 38px;
+}
+
+.kbd-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #14161b;
+}
+
+.kbd-btn.primary:hover {
+  background: #ff8055;
+  border-color: #ff8055;
+}
+
+.kbd-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 右栏：实时建议 */
+
+.suggest-pane {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.suggest-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.suggest-head b {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.suggest-rows {
+  display: grid;
+  gap: 2px;
+  overflow: auto;
+  max-height: 62vh;
+}
+
+.suggest-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.suggest-row:hover,
+.suggest-row.on {
+  background: var(--accent-soft);
+  border-color: rgba(255, 107, 61, 0.35);
+}
+
+.suggest-row .ini {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--accent);
+  letter-spacing: 0.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggest-row .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+}
+
+.suggest-row .nm em {
+  font-style: normal;
+  color: var(--ok);
+}
+
+.suggest-row .meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 分类页筛选面板（参照动漫视界：横排 chip 组 + 可展开） */
+
+.filter-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.filter-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.filter-label {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filter-chips .chip {
+  font-size: 12px;
+  padding: 4px 11px;
+  cursor: pointer;
+}
+
+.filter-chips .chip.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #14161b;
+}
+
+.filter-chips .chip.ghost {
+  color: var(--muted);
+  border-style: dashed;
 }

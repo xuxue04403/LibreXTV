@@ -131,6 +131,8 @@ export struct LivePlayerPage {
     this.channelUrl = ch.url;
     this.groupName = ch.group ?? '未分组';
     this.favorite = appModel.isLiveFavorite(ch.url);
+    // 切台后必须同步 `liveTarget`：收藏按钮读的是它，不同步就会「收藏上一台」。
+    appModel.liveTarget = ch;
     this.errorText = '';
     this.open();
   }
@@ -245,8 +247,9 @@ export struct LivePlayerPage {
             this.showList = !this.showList;
           } })
           PillButton({ text: this.favorite ? '★ 已收藏' : '☆ 收藏', onTap: () => {
-            const target = appModel.liveTarget;
-            if (target !== null) {
+            // 以当前正在播的这台为准，不要读可能过期的 liveTarget
+            const target = this.playlist[this.index] ?? appModel.liveTarget;
+            if (target !== null && target !== undefined) {
               appModel.toggleLiveFavorite(target);
               this.favorite = appModel.isLiveFavorite(target.url);
             }

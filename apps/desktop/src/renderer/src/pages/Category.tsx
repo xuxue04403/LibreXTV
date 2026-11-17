@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   browseCategory,
   groupSearchResults,
+  hasActiveFilter,
   HOME_CATEGORIES,
   type AggregatedGroup,
+  type CategoryFilter,
   type CategoryKey,
   type CategorySourceOutcome,
 } from '@librextv/core';
@@ -28,6 +30,30 @@ import type { WatchTarget } from './Watch';
  * 到顶就停止续页并明确告诉用户（而不是默默不再加载）。
  */
 const MAX_GRID_GROUPS = 480;
+
+/**
+ * 年份筛选项。
+ *
+ * 只列最近二十来年：采集站的老片年份分布很散（1978~2026 都见过），把全部年份铺出来
+ * 会变成一条几百个 chip 的长条，反而找不到「今年/去年」这类最常用的选项。
+ */
+const YEAR_OPTIONS = (() => {
+  const now = new Date().getFullYear();
+  const years = ['全部'];
+  for (let y = now + 1; y >= now - 19; y -= 1) years.push(String(y));
+  return years;
+})();
+
+/**
+ * 地区筛选项。
+ *
+ * 取的是采集站里 `vod_area` 的高频写法（实测各源混合「大陆/中国大陆/内地」，
+ * core 侧的 `matchesCategoryFilter` 会做同义归并，这里只给常用的几项）。
+ */
+const AREA_OPTIONS = ['全部', '大陆', '美国', '日本', '韩国', '中国香港', '中国台湾', '英国', '法国', '泰国', '印度'];
+
+/** 一排 chip 默认显示几个，其余折叠（对齐参照图里的「展开」） */
+const CHIPS_COLLAPSED = 9;
 
 export function CategoryPage({
   category,
@@ -56,6 +82,12 @@ export function CategoryPage({
   const [hasMore, setHasMore] = useState(false);
   const [fromCache, setFromCache] = useState(false);
   const [selected, setSelected] = useState<AggregatedGroup | null>(null);
+  /** 年份/地区筛选（服务端 6/14 支持，其余靠 core 侧本地兜底） */
+  const [filter, setFilter] = useState<CategoryFilter>({});
+  const [expanded, setExpanded] = useState<{ year: boolean; area: boolean }>({
+    year: false,
+    area: false,
+  });
   const abortRef = useRef<AbortController | null>(null);
   const runId = useRef(0);
   // `load` 是 useCallback 且依赖里没有 groups（那会让每次列表变化都重建回调），
@@ -117,6 +149,8 @@ export function CategoryPage({
           filterAdult: adultFilter,
           timeoutMs: 12_000,
           signal: controller.signal,
+          // 服务端能筛的源直接在服务端收窄，不支持的源由 browseCategory 本地兜底过滤
+          filter,
           // 边收边渲染：4 个源各回一次，首个源通常 1~3 秒就有内容，
           // 等全部回来才渲染会让用户盯着骨架屏 5 秒以上。
           // 回调给的是「目前为止的全部条目」，直接整体替换，不用自己做增量合并。
@@ -188,8 +222,14 @@ export function CategoryPage({
         if (myRun === runId.current) setLoading(false);
       }
     },
-    [adultFilter, category, label, sources, toast]
+    [adultFilter, category, label, sources, toast, filter]
   );
+
+  // 源签名：必须带上 url。内置源换址（清单升级）后 key 不变、url 变了，
+  // 只按 key 判重会沿用旧源的分类表与类型筛选结果，界面上还是老站的内容。
+  // 单独提成变量而不是写在依赖数组里：那个位置的表达式 react-hooks 无法静态分析，
+  // 会一直报 "complex expression in dependency array"。
+  const sourceSignature = sources.map((s) => `${s.key}=${s.url}`).join(',');
 
   useEffect(() => {
     if (sources.length === 0) return;
@@ -203,7 +243,7 @@ export function CategoryPage({
     // 成人过滤开关必须在这里：它是 load 的入参之一，改了却重载旧结果，
     // 用户会看到「关了过滤但列表里还是那些」。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [category, adultFilter, sources.map((s) => s.key).join(',')]);
+  }, [category, adultFilter, filter.year, filter.area, sourceSignature]);
 
   const supported = outcomes.filter((o) => o.supported).length;
   const failed = outcomes.filter((o) => !o.ok);
@@ -258,6 +298,39 @@ export function CategoryPage({
           <Icon name="refresh" size={15} />
           刷新
         </button>
+      </div>
+
+      {/* 筛选面板：照参照图做成横排 chip 组，可折叠 */}
+      <div className="filter-panel">
+        <FilterRow
+          label="年份"
+          options={YEAR_OPTIONS}
+          value={filter.year ?? '全部'}
+          expanded={expanded.year}
+          onToggle={() => setExpanded((prev) => ({ ...prev, year: !prev.year }))}
+          onSelect={(year) => setFilter((prev) => ({ ...prev, year: year === '全部' ? undefined : year }))}
+        />
+        <FilterRow
+          label="地区"
+          options={AREA_OPTIONS}
+          value={filter.area ?? '全部'}
+          expanded={expanded.area}
+          onToggle={() => setExpanded((prev) => ({ ...prev, area: !prev.area }))}
+          onSelect={(area) => setFilter((prev) => ({ ...prev, area: area === '全部' ? undefined : area }))}
+        />
+        {hasActiveFilter(filter) ? (
+          <div className="row" style={{ gap: 8, paddingTop: 4 }}>
+            <span className="hint">
+              已筛选{filter.year ? ` ${filter.year}` : ''}
+              {filter.area ? ` · ${filter.area}` : ''}
+              ，部分源不支持服务端筛选，已本地过滤
+            </span>
+            <span className="spacer" />
+            <button className="chip" onClick={() => setFilter({})}>
+              清除筛选
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {sources.length === 0 ? (
@@ -341,6 +414,61 @@ export function CategoryPage({
 }
 
 export type { CategoryKey };
+
+/**
+ * 一排筛选 chip。
+ *
+ * 折叠阈值是 9：参照图里年份/地区各有几十项，全铺出来会把结果网格挤出首屏。
+ * 折叠时仍在选中的项必须显示（否则用户看不到自己筛了什么）。
+ */
+function FilterRow({
+  label,
+  options,
+  value,
+  expanded,
+  onToggle,
+  onSelect,
+}: {
+  label: string;
+  options: string[];
+  value: string;
+  expanded: boolean;
+  onToggle: () => void;
+  onSelect: (next: string) => void;
+}) {
+  // 折叠时只留前 N 个，但**选中的那个必须留着**：否则用户点了「2024」之后
+  // 这一项被折叠进「展开」里，界面上看不到自己筛了什么。
+  const shown = expanded
+    ? options
+    : (() => {
+        const head = options.slice(0, CHIPS_COLLAPSED);
+        return head.includes(value) ? head : [...head, value];
+      })();
+  const hidden = options.length - shown.length;
+
+  return (
+    <div className="filter-row">
+      <span className="filter-label">{label}</span>
+      <div className="filter-chips">
+        {shown.map((option) => (
+          <button
+            key={option}
+            className={`chip${option === value ? ' on' : ''}`}
+            onClick={() => onSelect(option)}
+          >
+            {option}
+          </button>
+        ))}
+        {hidden > 0 || expanded ? (
+          <button className="chip ghost" onClick={onToggle}>
+            {expanded ? '收起' : `展开 ${hidden}`}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 /** 供首页复用的分类按钮行：只显示真的抓得到内容的分类 */
 export function CategoryButtons({ onSelect }: { onSelect: (key: CategoryKey) => void }) {
   const allSources = useAppStore((s) => s.sources);

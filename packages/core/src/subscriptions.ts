@@ -261,6 +261,9 @@ export function parseSubscription(text: string, subscriptionUrl?: string): Parse
 /** 解析已 JSON.parse 的订阅结构 */
 export function normalizeSubscription(data: unknown, subscriptionUrl?: string): ParsedSubscription {
   const name = subscriptionUrl ? hostnameOf(subscriptionUrl) : undefined;
+  // 源 key 前缀必须带上订阅地址：两份裸数组订阅各自都是 `sub_0`、`sub_1`…，
+  // 撞 key 后只能一起勾选/取消，健康度与历史会互相串到另一个订阅的源上。
+  const keyPrefix = subscriptionUrl ? `sub_${stableKey(subscriptionUrl)}` : undefined;
 
   // 裸数组：视为点播源列表
   if (Array.isArray(data)) {
@@ -283,7 +286,7 @@ export function normalizeSubscription(data: unknown, subscriptionUrl?: string): 
         stats.truncated += 1;
         continue;
       }
-      const normalized = normalizeVodSource(item, 'sub', sources.length);
+      const normalized = normalizeVodSource(item, keyPrefix ?? 'sub', sources.length);
       if (normalized) sources.push(normalized);
     }
     return { name, sources, liveSources: [], stats };
@@ -299,7 +302,8 @@ export function normalizeSubscription(data: unknown, subscriptionUrl?: string): 
     truncated: 0,
   };
   const listName = strOrUndef(obj.name) ?? name;
-  const prefix = subscriptionUrl ? `sub_${stableKey(subscriptionUrl)}` : `sub_${stableKey(JSON.stringify(obj).slice(0, 64))}`;
+  const prefix =
+    keyPrefix ?? `sub_${stableKey(JSON.stringify(obj).slice(0, 64))}`;
 
   const sources: SourceConfig[] = [];
   const liveSources: LiveSourceConfig[] = [];

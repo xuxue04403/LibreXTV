@@ -1,5 +1,18 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+/**
+ * 缺省流 id：从一个随机起点递增。
+ *
+ * 主进程的 `streamSeq` 也是递增的，两条序列必须不撞车，否则会互相 cancel 掉对方的流。
+ * 起点取随机数，撞上的概率可以忽略。
+ */
+let streamIdSeq = Math.floor(Math.random() * 1_000_000_000);
+
+function nextStreamId(): number {
+  streamIdSeq += 1;
+  return streamIdSeq;
+}
+
 export interface BridgeHttpOptions {
   headers?: Record<string, string>;
   timeoutMs?: number;
@@ -68,24 +81,23 @@ const bridge = {
     onChunk: (chunk: Uint8Array) => void
   ): Promise<BridgeStreamResponse> => {
     const channel = 'http:stream:chunk';
-    const startedChannel = 'http:stream:started';
-    // 主进程在 options.streamId 缺省时会自己分配 id，并在开流前用
-    // `http:stream:started` 回推。原来这里只比对 options.streamId，
-    // 省略该参数时所有 chunk 都被静默丢掉（「成功但 0 字节」）。
-    let assignedId: number | undefined;
-    const onStarted = (_event: unknown, id: number): void => {
-      if (assignedId === undefined) assignedId = id;
-    };
+    // 流的 id 必须由调用方（或这里）**在开流前**定下来。
+    //
+    // 曾经靠主进程的 `http:stream:started` 回推分配：那是 webContents 级广播，
+    // 而 `ipcRenderer.on` 是进程级监听，并发抓多个直播源时每个 invoke 都会错过
+    // 其他流的 started 事件，于是 `assignedId` 拿到的是「第一个收到的 id」并永不重设，
+    // 第 2..N 个流把自己的分片写进 1 号流的结果里（直播页除第一个源外内容全错）。
+    // 现在缺省也在这里分配，见 `nextStreamId()`。
+    const streamId = options.streamId ?? nextStreamId();
     const listener = (_event: unknown, id: number, chunk: Uint8Array): void => {
-      if (id === (assignedId ?? options.streamId)) onChunk(chunk);
+      if (id === streamId) onChunk(chunk);
     };
-    ipcRenderer.on(startedChannel, onStarted);
     ipcRenderer.on(channel, listener);
-    const cleanup = (): void => {
-      ipcRenderer.removeListener(startedChannel, onStarted);
-      ipcRenderer.removeListener(channel, listener);
-    };
-    return ipcRenderer.invoke('http:stream', url, options).finally(cleanup) as Promise<BridgeStreamResponse>;
+    return ipcRenderer
+      .invoke('http:stream', url, { ...options, streamId })
+      .finally(() => {
+        ipcRenderer.removeListener(channel, listener);
+      }) as Promise<BridgeStreamResponse>;
   },
   streamCancel: (streamId: number): Promise<void> => ipcRenderer.invoke('http:stream:cancel', streamId),
   /** 首页推荐：主进程固定第三方地址并做缓存，页面只传枚举参数 */
