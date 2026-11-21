@@ -24,3 +24,16 @@ fun indexOfChannel(list: List<LiveChannel>, url: String?): Int {
 /** 取下标对应的频道，越界返回 null */
 fun channelAt(list: List<LiveChannel>, index: Int): LiveChannel? =
     if (index < 0 || index >= list.size) null else list[index]
+
+/**
+ * 退出直播播放页后，首焦点该落在第几台。
+ *
+ * 优先「刚看的那台」：退出多半是为了换台或挑别的，焦点回到原处才顺手。
+ * 那台不在当前可见列表里（换了分组、关键词过滤掉了、列表还没到）时退回第一台。
+ * 返回 -1 表示没有可聚焦的频道（空列表）。
+ */
+fun liveFocusIndex(list: List<LiveChannel>, lastUrl: String?): Int {
+    if (list.isEmpty()) return -1
+    val at = indexOfChannel(list, lastUrl)
+    return if (at >= 0) at else 0
+}

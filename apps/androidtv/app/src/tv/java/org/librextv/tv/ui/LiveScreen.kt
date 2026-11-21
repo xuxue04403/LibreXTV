@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -67,6 +68,7 @@ import org.librextv.tv.data.Net
 import org.librextv.tv.data.Playback
 import org.librextv.tv.data.channelAt
 import org.librextv.tv.data.indexOfChannel
+import org.librextv.tv.data.liveFocusIndex
 import org.librextv.tv.data.stepChannelIndex
 import org.librextv.tv.ui.theme.Accent
 import org.librextv.tv.ui.theme.OkGreen
@@ -112,6 +114,39 @@ fun LiveScreen(vm: AppViewModel, data: AppData) {
             map[g] = (map[g] ?: 0) + 1
         }
         map
+    }
+
+    // 首焦点：本页原来一个 FocusRequester 都没有，是唯一不认领焦点的主页级页面。
+    // 从直播播放页返回时，持有焦点的播放页根 Box 已被移除、Compose 清空焦点，
+    // 这里又没人认领，于是第一次按方向键落到整棵树第一个可聚焦项 —— 顶栏的「首页」，
+    // 它的 onFocusChange 走「导航焦点即切页」→ 页面直接被切到首页。
+    val autoFocus = rememberAutoFocusState(vm.contentFocusTick)
+    val gridState = rememberLazyGridState()
+    val focusTarget = remember { FocusRequester() }
+    // 只为「进入本页这一次」抢焦点：列表随后变化（切分组、列表从空变满）不能再抢，
+    // 否则用户刚把焦点移走就会被拽回来。
+    var focusClaimed by remember { mutableStateOf(false) }
+
+    // 退出播放页后把焦点还给刚看的那台；没看过（或不在当前分组里）就落在第一台
+    val focusIndex = remember(channels, vm.liveFocusUrl) {
+        liveFocusIndex(channels, vm.liveFocusUrl)
+    }
+
+    LaunchedEffect(channels.isEmpty(), vm.contentFocusTick) {
+        if (channels.isEmpty() || focusClaimed) return@LaunchedEffect
+        // 焦点还在导航栏里（用户只是把焦点移进本页）时不抢，否则 ↓ 走不到导航第二项
+        if (!autoFocus.consume(vm.navFocusHold, vm.contentFocusTick)) return@LaunchedEffect
+        // 必须重试：组合第一次跑时目标节点可能还没挂载/还没放置，
+        // scrollToItem 与 requestFocus 都会抛（被 runCatching 吞掉后焦点就没人认领）
+        repeat(4) { attempt ->
+            if (attempt > 0) kotlinx.coroutines.delay(80L)
+            runCatching { gridState.scrollToItem(focusIndex) }
+            if (runCatching { focusTarget.requestFocus() }.isSuccess) {
+                autoFocus.handledTick = vm.contentFocusTick
+                focusClaimed = true
+                return@LaunchedEffect
+            }
+        }
     }
 
     Row(Modifier.fillMaxSize().padding(ScreenPadding)) {
@@ -183,12 +218,16 @@ fun LiveScreen(vm: AppViewModel, data: AppData) {
                     columns = GridCells.Adaptive(238.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
+                    state = gridState,
                     modifier = Modifier.fillMaxSize(),
                 ) {
+                    // 首焦点目标：`focusTarget` 只能挂在一个节点上，挂空（列表还没到时）没关系
+                    val targetUrl = channels.getOrNull(focusIndex)?.url
                     items(channels, key = { "${it.sourceKey}:${it.url}" }) { channel ->
                         ChannelRow(
                             channel = channel,
                             favorite = data.liveFavorites.any { it.url == channel.url },
+                            focusRequester = if (channel.url == targetUrl) focusTarget else null,
                             // 把当前可见列表一并带进播放页：遥控器上下键就在这个列表里循环换台，
                             // 而不是全量频道（用户已选分组/搜过关键词，换到列表外的频道会莫名其妙）
                             onPlay = { vm.go(Screen.LivePlayer(channel, channels)) },
@@ -232,11 +271,18 @@ private fun GroupRow(label: String, count: Int, active: Boolean, onClick: () -> 
 private fun ChannelRow(
     channel: LiveChannel,
     favorite: Boolean,
+    /** 首焦点目标：只有「刚看的那台」（或第一台）会被挂上 */
+    focusRequester: FocusRequester? = null,
     onPlay: () -> Unit,
     onToggleFavorite: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        TvCard(onClick = onPlay, modifier = Modifier.weight(1f), focusedScale = 1.03f) { focused ->
+        TvCard(
+            onClick = onPlay,
+            modifier = Modifier.weight(1f),
+            focusedScale = 1.03f,
+            focusRequester = focusRequester,
+        ) { focused ->
             Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier.size(44.dp).background(Color(0xFF0C0F14), RoundedCornerShape(9.dp)),
@@ -359,6 +405,9 @@ fun LivePlayerScreen(
 
     // 换台：同一个播放器换源
     LaunchedEffect(current.url) {
+        // 记下当前这台：退出后列表页据此把焦点还给「刚看的那台」，
+        // 而不是退回第一台（换台之后尤其明显）
+        vm.rememberLiveChannel(current.url)
         error = null
         buffering = true
         runCatching {

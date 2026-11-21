@@ -194,6 +194,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     var liveBytes by mutableLongStateOf(0L)
         private set
+
+    /**
+     * 最近一次在直播播放页里看的那台（频道 URL）。
+     *
+     * 退出播放页时焦点要靠它回到「刚看的那台」。没有它的话，直播列表页组合出来时
+     * 没有任何节点认领焦点，第一次按方向键会被顶栏的「首页」抢走 —— 导航栏是
+     * 「焦点移上去就切页」，于是页面直接跳到首页。
+     */
+    var liveFocusUrl by mutableStateOf<String?>(null)
+        private set
+
     var category by mutableStateOf(CategoryUi())
         private set
     var toast by mutableStateOf<String?>(null)
@@ -1340,6 +1351,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // —— 直播 ——
+
+    /**
+     * 记录「正在看哪一台」：进播放页、换台时都调一次。
+     *
+     * 只影响退出后的焦点落点，不参与播放逻辑，所以不做去重、也不落盘。
+     */
+    fun rememberLiveChannel(url: String) {
+        if (liveFocusUrl != url) liveFocusUrl = url
+    }
 
     /** 直播缓存的签名：源地址集合 + 成人过滤开关，任一变化都重拉 */
     private fun liveSignature(sources: List<LiveSource>, adultFilter: Boolean): String =

@@ -73,4 +73,21 @@ class LiveSwitchTest {
         assertNull(channelAt(list, 3))
         assertNull(channelAt(list, -1))
     }
+
+    @Test
+    fun `退出播放页后首焦点回到刚看的那台`() {
+        assertEquals(2, liveFocusIndex(list, "http://a/3"))
+    }
+
+    @Test
+    fun `刚看的那台不在当前列表里时首焦点落在第一台`() {
+        // 换了分组 / 关键词把正在看的台过滤掉了：列表里找不到，退回第一台
+        assertEquals(0, liveFocusIndex(list, "http://other/9"))
+        assertEquals(0, liveFocusIndex(list, null))
+    }
+
+    @Test
+    fun `没有频道时首焦点下标为 -1`() {
+        assertEquals(-1, liveFocusIndex(emptyList(), "http://a/1"))
+    }
 }
