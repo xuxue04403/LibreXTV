@@ -163,6 +163,36 @@ pwsh -File tools/harmony/gen-signing.ps1
 
 > 注意：profile 里的 `distribution-certificate` 必须写成 **URL-safe base64**（`+`→`-`、`/`→`_`），否则 `sign-app` 报 `Illegal base64 character 2f`；密码必须 ≥32 字符，否则 hvigor 报 `00303116`。
 
+#### 装到真机：必须换成华为 AGC 签发的材料
+
+`gen-signing.ps1` 生成的是 **OpenHarmony 测试根证书**链（`CN=OpenHarmony Application CA`），只能装在模拟器上。真机（HarmonyOS 5 / NEXT）只信任华为签发的证书，用它签出来的 HAP 装上会报：
+
+```
+error: failed to install bundle. code:9568257 error: fail to verify pkcs7 file
+```
+
+这条报错不会告诉你是证书的问题，下面这些坑都是实际踩出来的：
+
+1. **包名不能用保留字**。`org.librextv.harmony` 在 AGC 建 APP ID 时会被拒（`harmony` / `ohos` / `oh` / `system` 等不能作为独立段）。当前用的是 `org.librextv.app`。
+2. **Profile 类型要选「调试」**。「指定设备发布」仍是发布证书体系，`hdc install` 一样验证失败。
+3. **「申请权限」不要勾**。那栏是给受限 ACL 权限（读写通讯录、后台定位等）用的。本项目只用 `ohos.permission.INTERNET` 与 `ohos.permission.GET_NETWORK_INFO`，都是 normal 级，装机自动授予。
+4. **`.cer` 必须是证书链**，不能是单张证书。AGC 下载的 `.cer` 里是「根 CA G2 → Developer Relations CA G2 → 你的开发证书」三张；`hap-sign-tool` 缺中间那张就报 `11013004 Profile cert must a cert chain`，我试过「开发证书 + 根 CA」手工拼链，会报 `11013002 verify certificate chain failed! Signature does not match`。
+5. **证书必须由本机 `.p12` 的 CSR 申请得到**，否则签名能跑完、装机同样报 `9568257`。签之前用 `compare-pubkey.cjs` 比一下公钥能省掉这轮排查。
+6. **Profile 的 `device-ids` 里要有这台设备**，否则装机报签名或 profile 校验失败。
+
+材料齐了之后：
+
+```bash
+pwsh -File tools/harmony/use-huawei-signing.ps1 `
+  -CertFile    apps/harmonyos/signing/huawei/librextv-app.cer `
+  -ProfileFile apps/harmonyos/signing/huawei/librextv-debug.p7b `
+  -KeystoreFile apps/harmonyos/signing/huawei/librextv-huawei.p12 `
+  -KeyAlias librextv -Password '<密钥库密码>'
+pwsh -File tools/harmony/build.ps1 -Mode release
+```
+
+`use-huawei-signing.ps1` 四步都会校验：别名存在 → profile 可验签且 bundle-name 与 `AppScope/app.json5` 一致 → **证书公钥与密钥库配对**（这一步是最容易漏的，不配对时装机只给一句 `fail to verify pkcs7 file`）→ 生成 hvigor 的密码密文与 `signing/material/`。
+
 ### 编译
 
 ```bash
@@ -186,14 +216,24 @@ node node_modules/@ohos/hvigor/bin/hvigor.js assembleHap --no-daemon
 ### 安装到真机
 
 ```bash
-.tools/harmony/sdk-7.0/HarmonyOS-NEXT2/openharmony/toolchains/hdc.exe list targets
-.tools/harmony/sdk-7.0/HarmonyOS-NEXT2/openharmony/toolchains/hdc.exe install entry-default-signed.hap
+pwsh -File tools/harmony/install-hap.ps1                     # 装 release/ 下最新 HAP 并拉起
+pwsh -File tools/harmony/install-hap.ps1 -Hap D:\x.hap      # 装指定文件
+pwsh -File tools/harmony/install-hap.ps1 -NoLaunch           # 只装不启动
 ```
 
-手机需在「设置 → 关于手机」连点版本号开启开发者模式，再打开「USB 调试」。用本地自签证书装的包只能装在**已登录开发者账号并开启调试的设备**上；要分发到他人设备，需在 AppGallery Connect 用企业/个人开发者证书重新签发 profile。
+等价的手工命令（**必须用 `hms` 目录下那份 hdc**，`openharmony` 目录下的那份会把真机显示成 Unauthorized 或干脆列不出来、只剩两个蓝牙串口）：
+
+```bash
+.tools/harmony/sdk-7.0/HarmonyOS-NEXT2/hms/toolchains/hdc.exe list targets
+.tools/harmony/sdk-7.0/HarmonyOS-NEXT2/hms/toolchains/hdc.exe -t <设备序列号> install -r apps/harmonyos/release/LibreXTV-Harmony-<版本>.hap
+.tools/harmony/sdk-7.0/HarmonyOS-NEXT2/hms/toolchains/hdc.exe -t <设备序列号> shell "aa start -a EntryAbility -b org.librextv.app"
+```
+
+手机需在「设置 → 关于手机」连点版本号开启开发者模式，再打开「USB 调试」，插线后手机上会弹「允许调试」，必须点允许。用 AGC 调试证书 + 调试 Profile 签的包只能装在 **Profile 里已登记 UDID** 的设备上（调试证书有效期：实名开发者 1 年，未实名 14 天）；要分发给他人设备，需在 AGC 换成发布证书 + 发布 Profile 并上架应用市场。
 
 ### 常见问题
 
+- `fail to verify pkcs7 file`（`9568257`）：证书链不是华为签发的，或证书与本地 `.p12` 不是同一对，或 Profile 没登记这台设备。见上文「装到真机：必须换成华为 AGC 签发的材料」。
 - `SDK component missing`：SDK 目录层级不对，必须严格是 `<SDK_HOME>/<平台>/<openharmony|hms>/<组件>`。
 - `00303024 / INCONSISTENT_MODEL_VERSION`：`oh-package.json5` 的 `modelVersion` 必须与 `hvigor/hvigor-config.json5` 一致（当前都是 `26.0.0`）；`build-profile.json5` 里**不能**写 `modelVersion`。
 - `00303195 Unable to obtain the module information`：`module.json5` 必须是 `{ "module": { ... } }` 包裹结构。

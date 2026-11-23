@@ -36,6 +36,8 @@ $env:DEVECO_SDK_HOME = $sdk
 Push-Location $project
 try {
     $args = @('node_modules\@ohos\hvigor\bin\hvigor.js', $Task, '-p', "buildMode=$Mode")
+    # 默认就走 --no-daemon：CI 与本机一次性构建都用不上常驻守护进程，
+    # 而守护进程会在改完签名材料后继续用旧缓存签出旧包，排查起来很费时。
     if ($NoDaemon -or $true) { $args += '--no-daemon' }
     & node @args
     if ($LASTEXITCODE -ne 0) { throw "hvigor 构建失败（exit $LASTEXITCODE）" }

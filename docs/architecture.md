@@ -27,7 +27,7 @@
                         └──────────────────────────────┘
 ```
 
-四个端产物：桌面安装包（Electron）、`app-tv-release.apk`（`org.librextv.tv`）、`app-phone-release.apk`（`org.librextv.tv.phone`）、`entry-default-signed.hap`（`org.librextv.harmony`）。电视版与手机版共用 `data/`、`AppViewModel`、`NavBack`、`cast/`、`ui/theme/`；鸿蒙版是独立实现。
+四个端产物：桌面安装包（Electron）、`app-tv-release.apk`（`org.librextv.tv`）、`app-phone-release.apk`（`org.librextv.tv.phone`）、`entry-default-signed.hap`（`org.librextv.app`）。电视版与手机版共用 `data/`、`AppViewModel`、`NavBack`、`cast/`、`ui/theme/`；鸿蒙版是独立实现。
 
 没有服务端进程、没有数据库、没有账号体系。所有状态都在本机。
 

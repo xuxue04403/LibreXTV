@@ -2,7 +2,7 @@
 #
 # 用法：
 #   pwsh -File tools/harmony/gen-signing.ps1
-#   pwsh -File tools/harmony/gen-signing.ps1 -BundleName org.librextv.harmony -Force
+#   pwsh -File tools/harmony/gen-signing.ps1 -BundleName org.librextv.app -Force
 #
 # 产物（全部在 apps/harmonyos/signing/，该目录已 gitignore，绝不入库）：
 #   librextv.p12        应用密钥库
@@ -16,7 +16,7 @@
 #     「Illegal base64 character 2f」。
 #   - 密码必须 >= 32 字符，否则 hvigor 报 00303116。
 param(
-    [string]$BundleName = 'org.librextv.harmony',
+    [string]$BundleName = 'org.librextv.app',
     [string]$Password = 'LibreXTV_HarmonyOS_2026_SignKey01',
     [string]$KeyAlias = 'librextv-key',
     [switch]$Force

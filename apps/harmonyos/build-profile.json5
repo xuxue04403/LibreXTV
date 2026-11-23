@@ -6,9 +6,9 @@
         "type": "HarmonyOS",
         "material": {
           "certpath": "./signing/librextv-app.cer",
-          "storePassword": "00000031a6243f54c139013dfe1330e586fb7543533f02c0f5a8ba2355d8e9fe8c0e41e1e27a0bb5b5e38186b12abc0202eae0efa480b638d8070691256ff000a0",
-          "keyAlias": "librextv-key",
-          "keyPassword": "00000031a6243f54c139013dfe1330e586fb7543533f02c0f5a8ba2355d8e9fe8c0e41e1e27a0bb5b5e38186b12abc0202eae0efa480b638d8070691256ff000a0",
+          "storePassword": "00000023ffe4653be8667a7719416a2bcf30edf68eaf9e4569e1bf3d4d155d2d5aea123461ffc0bc1664af95ac99939218f6b3",
+          "keyAlias": "librextv",
+          "keyPassword": "00000023ffe4653be8667a7719416a2bcf30edf68eaf9e4569e1bf3d4d155d2d5aea123461ffc0bc1664af95ac99939218f6b3",
           "profile": "./signing/profile.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "./signing/librextv.p12"

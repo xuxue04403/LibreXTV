@@ -52,7 +52,7 @@ Copy-Item $CertFile (Join-Path $signing 'librextv-app.cer') -Force
 Copy-Item $ProfileFile (Join-Path $signing 'profile.p7b') -Force
 Copy-Item $KeystoreFile (Join-Path $signing 'librextv.p12') -Force
 
-Write-Host '[1/3] 校验密钥库与别名…'
+Write-Host '[1/4] 校验密钥库与别名…'
 $aliases = & keytool -list -keystore (Join-Path $signing 'librextv.p12') -storepass $Password -storetype PKCS12 2>&1
 if ($LASTEXITCODE -ne 0) { throw "打开密钥库失败（密码是否正确？）`n$($aliases | Out-String)" }
 if (($aliases | Out-String) -notmatch [regex]::Escape($KeyAlias)) {
@@ -60,7 +60,7 @@ if (($aliases | Out-String) -notmatch [regex]::Escape($KeyAlias)) {
 }
 Write-Host "      别名 $KeyAlias 存在"
 
-Write-Host '[2/3] 校验描述文件…'
+Write-Host '[2/4] 校验描述文件…'
 $toolchains = Join-Path $repo '.tools\harmony\sdk-7.0\HarmonyOS-NEXT2\openharmony\toolchains\lib'
 $signTool = Join-Path $toolchains 'hap-sign-tool.jar'
 $verifyOut = & java -jar $signTool verify-profile -inFile (Join-Path $signing 'profile.p7b') -outFile (Join-Path $signing '_verify-profile.json') 2>&1
@@ -76,7 +76,25 @@ if ($bundle -ne $localBundle) {
 }
 Remove-Item (Join-Path $signing '_verify-profile.json') -Force
 
-Write-Host '[3/3] 生成 hvigor 密码密文材料…'
+Write-Host '[3/4] 校验证书与密钥库是否同一把…'
+# 证书里的公钥必须与密钥库私钥配对，否则签名能跑完、装机只报一句
+# 「fail to verify pkcs7 file」，极难定位。这里用 X509Certificate 比 SPKI 指纹。
+# 注意：AGC 导出的 .cer 是「根 CA → 中间 CA → 开发证书」的链，叶子证书在最后一张，
+# compare-pubkey.cjs 会逐张比对，任意一张配对即通过。
+$tmpCer = Join-Path ([IO.Path]::GetTempPath()) "librextv-sign-check-$([guid]::NewGuid().ToString('N').Substring(0,8)).pem"
+& keytool -exportcert -rfc -alias $KeyAlias -keystore (Join-Path $signing 'librextv.p12') `
+    -storepass $Password -storetype PKCS12 -file $tmpCer 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tmpCer)) { throw "从密钥库导出证书失败（别名 $KeyAlias）" }
+$compare = & node (Join-Path $PSScriptRoot 'compare-pubkey.cjs') (Join-Path $signing 'librextv-app.cer') $tmpCer 2>&1
+$compare | ForEach-Object { Write-Host "      $_" }
+$cmpExit = $LASTEXITCODE
+Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
+if ($cmpExit -eq 1) {
+    throw "证书公钥与密钥库里的私钥不是同一把。AGC 上的证书必须由本密钥库的 CSR 申请得到，否则装机报 fail to verify pkcs7 file。"
+}
+if ($cmpExit -ne 0) { throw "证书比对失败：`n$($compare | Out-String)" }
+
+Write-Host '[4/4] 生成 hvigor 密码密文材料…'
 & node (Join-Path $PSScriptRoot 'gen-sign-material.cjs') $project $Password $KeyAlias
 if ($LASTEXITCODE -ne 0) { throw "gen-sign-material.cjs 失败（exit $LASTEXITCODE）" }
 

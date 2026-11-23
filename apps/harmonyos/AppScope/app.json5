@@ -1,6 +1,6 @@
 {
   "app": {
-    "bundleName": "org.librextv.harmony",
+    "bundleName": "org.librextv.app",
     "vendor": "librextv",
     "versionCode": 7,
     "versionName": "1.3.13",

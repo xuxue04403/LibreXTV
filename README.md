@@ -26,7 +26,7 @@
 | 桌面端 | Electron + React + hls.js | `LibreXTV-Setup-*.exe` / dmg / AppImage | Windows / macOS / Linux |
 | Android TV | Kotlin + Compose + Media3 | `org.librextv.tv`，`app-tv-release.apk` | 电视盒子、智能电视 |
 | Android 手机 | 同电视版，独立 flavor 与竖屏 UI | `org.librextv.tv.phone`，`app-phone-release.apk` | Android 手机/平板；**HarmonyOS 4.x 及更早的华为手机也能直接装** |
-| 鸿蒙原生 | ArkTS + ArkUI + AVPlayer | `org.librextv.harmony`，`entry-default-signed.hap` | **HarmonyOS 5 / NEXT**（纯血鸿蒙，不兼容 APK） |
+| 鸿蒙原生 | ArkTS + ArkUI + AVPlayer | `org.librextv.app`，`entry-default-signed.hap` | **HarmonyOS 5 / NEXT**（纯血鸿蒙，不兼容 APK） |
 
 Android 电视版与手机版共用同一份 `data/` 层、`AppViewModel`、投屏（DLNA）与主题，只有界面、入口 Activity 与 Manifest 按 product flavor 分开——所以两边的源管理、换源、续播、拼音检索行为完全一致。鸿蒙版是独立重写的原生工程，逻辑逐条移植但代码不复用。
 
