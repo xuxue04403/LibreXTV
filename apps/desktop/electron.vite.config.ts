@@ -7,7 +7,15 @@ const coreAlias = resolve(__dirname, '../../packages/core/src/index.ts');
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
-    resolve: { alias: { '@librextv/core': coreAlias } },
+    resolve: {
+      // 顺序要紧：vite 的 alias 是**前缀**替换，`@librextv/core` 排前面的话，
+      // `@librextv/core/seed-titles` 会先被它吃成 `.../index.ts/seed-titles` 再去加载，
+      // 报 ENOENT。所以更长的那个必须写在前面。
+      alias: {
+        '@librextv/core/seed-titles': resolve(__dirname, '../../packages/core/src/seed-titles.ts'),
+        '@librextv/core': coreAlias,
+      },
+    },
     build: {
       rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') } },
     },

@@ -891,7 +891,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * 直接点选即可，不必先把整个词打完。
      */
     fun suggestTitles(query: String, limit: Int = 12): List<SearchItem> =
-        runCatching { repo.suggestTitles(query, limit) }.getOrDefault(emptyList())
+        runCatching { repo.suggestTitles(query, limit) }
+            .onFailure { android.util.Log.e("SuggestTitles", "建议查询失败 q=$query", it) }
+            .getOrDefault(emptyList())
 
     fun startSearch(keyword: String) {
         val word = keyword.trim()

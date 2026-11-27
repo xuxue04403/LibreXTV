@@ -44,6 +44,7 @@ import org.librextv.tv.AppViewModel
 import org.librextv.tv.Screen
 import org.librextv.tv.data.AppData
 import org.librextv.tv.data.Pinyin
+import org.librextv.tv.data.SEED_SOURCE_KEY
 import org.librextv.tv.data.SearchGroup
 import org.librextv.tv.data.SearchItem
 import org.librextv.tv.ui.theme.Accent
@@ -89,6 +90,15 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
     // 导航项的意思是「我想搜点别的」，沿用上次的串会让人以为键盘没响应。
     var draft by remember { mutableStateOf("") }
     var emptyHint by remember { mutableStateOf(false) }
+    /**
+     * 右栏现在是「建议模式」还是「结果模式」。
+     *
+     * 电视只有一栏可用（1080p 屏才 540dp 高，键盘已吃掉左栏 370dp），建议与结果
+     * 必须二选一。原来的判据是 `draft != search.keyword`，点完建议后 draft 停在
+     * 首字母、keyword 却是中文名，两者永远不等 —— 结果出来了但建议还盖在上面，
+     * 用户看不到自己刚点的东西。改成用「用户最近一次操作是敲键还是点选」来决定。
+     */
+    var editing by remember { mutableStateOf(false) }
     val firstKeyFocus = remember { FocusRequester() }
     val submitFocus = remember { FocusRequester() }
 
@@ -129,15 +139,18 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
                 value = draft,
                 onAppend = { ch ->
                     emptyHint = false
+                    editing = true
                     // 键盘是追加式的：只接受字母数字，长度给个上限免得一直敲下去
                     if (draft.length < MAX_DRAFT_LENGTH) draft += ch
                 },
                 onBackspace = {
                     emptyHint = false
+                    editing = true
                     draft = draft.dropLast(1)
                 },
                 onClear = {
                     emptyHint = false
+                    editing = true
                     draft = ""
                 },
                 onSubmit = {
@@ -145,6 +158,7 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
                     if (word.isEmpty()) {
                         emptyHint = true
                     } else {
+                        editing = false
                         vm.startSearch(word)
                     }
                 },
@@ -170,6 +184,7 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
 
             SearchHeader(
                 draft = draft,
+                editing = editing,
                 lastKeyword = search.keyword,
                 loading = search.loading,
                 searched = search.searched,
@@ -188,7 +203,10 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
                     )
                 }
 
-                pinyinHint -> {
+                // 这行只在「还在敲字」时有意义：它解释的是右栏那些建议是怎么来的。
+                // 切到结果模式后 draft 被回填成首字母，再说「按首字母检索 QYN」会让人
+                // 以为下面 14 部影片是这次拼音检索的直接产物，其实是用「庆余年」搜出来的。
+                pinyinHint && editing -> {
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "按首字母检索：${draft.uppercase()}（本地索引 + 各源最新列表）",
@@ -198,9 +216,10 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
                 }
             }
 
-            // 敲字但还没搜：整块给建议列表。搜过之后建议让位给结果，但仍然保留在
-            // 结果之上（用户想再点另一条建议时不用先清空）。
-            val showSuggestions = draft.isNotEmpty() && draft != search.keyword
+            // 正在敲字时整块给建议列表；一旦点了建议或按了搜索键，右栏立刻让位给结果。
+            // 判据是「最近一次操作是敲键还是点选」，不能拿 draft 和 keyword 比 —— 点完
+            // 建议后 draft 停在首字母、keyword 是中文名，两者永远不等，建议会一直盖住结果。
+            val showSuggestions = draft.isNotEmpty() && editing
             val failedOutcomes = search.outcomes.filter { !it.ok }
             if (showSuggestions) {
                 Spacer(Modifier.height(8.dp))
@@ -209,9 +228,15 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
                     suggestions = suggestions,
                     modifier = Modifier.weight(1f),
                     onPick = { item ->
+                        editing = false
                         // 回填首字母而不是中文名：桌面端同一条规则，见文件头注释
                         draft = Pinyin.initials(item.name).takeIf { it.isNotEmpty() } ?: draft
-                        vm.startSearch(item.name)
+                        if (item.sourceKey == SEED_SOURCE_KEY) {
+                            // 种子条目只有片名、没有 vodId，按中文名去各源搜一次
+                            vm.searchSuggestion(item.name, emptyList())
+                        } else {
+                            vm.startSearch(item.name)
+                        }
                     },
                 )
             } else {
@@ -220,6 +245,7 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
                     RecentSearches(
                         words = data.recentSearches,
                         onPick = { word ->
+                            editing = false
                             // 回填原则与「点建议」一致：输入框只放首字母。历史里可能
                             // 存着中文片名（比如只点过建议没再敲键就搜了），直接填进
                             // 去会让后续键入变成「中文+字母」，永远匹配不上任何片名。
@@ -287,6 +313,7 @@ private const val MAX_DRAFT_LENGTH = 16
 @Composable
 private fun SearchHeader(
     draft: String,
+    editing: Boolean,
     lastKeyword: String,
     loading: Boolean,
     searched: Boolean,
@@ -295,11 +322,13 @@ private fun SearchHeader(
     groupCount: Int,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        // 已经在看结果时，标题要说明「这是哪个词的结果」：进页面时 draft 是空的，
-        // 只写「建议 · 输入拼音首字母」会让用户以为上一次的结果凭空冒出来。
+        // 标题要跟着右栏当前显示的内容走，不能只看 draft 空不空：
+        // 点完建议后 draft 会被回填成首字母（为了让用户接着追加），但右栏已经切成结果了，
+        // 此时写「建议 · QYN」而下面是「14 部影片」，看着像两回事。
         val title = when {
-            draft.isNotEmpty() -> "建议 · ${draft.uppercase()}"
+            editing && draft.isNotEmpty() -> "建议 · ${draft.uppercase()}"
             lastKeyword.isNotEmpty() -> "「$lastKeyword」的结果"
+            draft.isNotEmpty() -> "建议 · ${draft.uppercase()}"
             else -> "建议 · 输入拼音首字母"
         }
         Text(
@@ -346,7 +375,20 @@ private fun SuggestionPane(
         return
     }
     LazyColumn(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        items(suggestions.take(MAX_SUGGESTIONS), key = { "${it.sourceKey}:${it.vodId}" }) { item ->
+        items(
+            suggestions.take(MAX_SUGGESTIONS),
+            // 种子条目一律 sourceKey="seed"、vodId=""，光拼 sourceKey:vodId 会得到
+            // 一串完全相同的 "seed:"，LazyColumn 抛 IllegalArgumentException「Key
+            // "seed:" was already used」直接把进程干掉（实测 FATAL EXCEPTION: main）。
+            // 种子条目本来就没有 vodId，用片名做后缀才唯一。
+            key = { item ->
+                if (item.sourceKey == SEED_SOURCE_KEY) {
+                    "${item.sourceKey}:${item.name}"
+                } else {
+                    "${item.sourceKey}:${item.vodId}"
+                }
+            },
+        ) { item ->
             SuggestionRow(item = item, draft = draft, onClick = { onPick(item) })
         }
     }

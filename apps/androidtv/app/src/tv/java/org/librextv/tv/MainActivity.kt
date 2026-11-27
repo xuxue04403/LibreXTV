@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.librextv.tv.cast.CastRuntime
 import org.librextv.tv.data.Pinyin
+import org.librextv.tv.data.SeedTitles
 import org.librextv.tv.cast.DlnaServer
 import org.librextv.tv.ui.LibreXtvApp
 import org.librextv.tv.ui.theme.LibreXtvTheme
@@ -17,7 +18,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installPinyinTable()
+        installSeedTitles()
         startCastReceiver()
+
 
         setContent {
             LibreXtvTheme {
@@ -45,6 +48,19 @@ class MainActivity : ComponentActivity() {
         runCatching {
             assets.open("pinyin-alts.txt").bufferedReader().use { Pinyin.installAlts(it.readText()) }
         }
+    }
+
+    /**
+     * 载入内置的「拼音首字母 → 中文片名」种子表。
+     *
+     * 采集站只支持 `LIKE '%中文%'`，拼音检索只能本地做，而本地索引只装得下用户
+     * 扫过的那些页（实测 1209 条 / 全站 150 万条 = 0.08%）。种子表把约 10 万个
+     * 真实片名打进 APK，敲 `qmmk` 才能真的找到「奇妙萌可」。
+     *
+     * 后台线程加载，不阻塞首屏；文件缺失时保持未就绪，搜索退化成只用本地索引。
+     */
+    private fun installSeedTitles() {
+        SeedTitles.install(applicationContext)
     }
 
     /** 启动 DLNA 接收端：让手机投屏列表里出现本机 */

@@ -28,5 +28,9 @@ export * from './live';
 export * from './live-switch';
 export * from './pinyin';
 export * from './title-index';
+// 注意：`./seed-titles` 不在这个 barrel 里。它 import 了 node:fs / node:zlib，
+// 一旦被 barrel 带出来，渲染层（浏览器环境）打包时会被 vite 外部化成空模块后报
+// 「"dirname" is not exported by "__vite-browser-external"」。主进程用
+// `@librextv/core/seed-titles` 显式引用那一个文件。
 export * from './subscriptions';
 export * from './storage';

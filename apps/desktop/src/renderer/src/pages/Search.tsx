@@ -7,6 +7,7 @@ import {
   groupSearchResults,
   isSourceDisabled,
   normalizeQuery,
+  pinyinInitials,
   rankSearchGroups,
   remotePinyinSearch,
   remotePinyinSources,
@@ -18,7 +19,7 @@ import {
   type SuggestionGroup,
   type TitleIndexEntry,
 } from '@librextv/core';
-import { http } from '../lib/bridge';
+import { http, seedLookup } from '../lib/bridge';
 import { cachedSearch, rememberSearch } from '../lib/catalog-cache';
 import { currentIndex, subscribeIndex } from '../lib/title-index-warmer';
 import { useAppStore } from '../lib/store';
@@ -116,6 +117,24 @@ export function SearchPage({
   // 校验：`controller.signal.aborted` 只能挡住被 cleanup 取消的那些，挡不住
   // 「用户从 abc 改成 abcd、旧请求先返回」这类替换竞争。
   const liveNeedle = useRef('');
+  /**
+   * 内置片库：22 万条片名，覆盖各源全站（含 2022 年的老片）。
+   *
+   * 本地 `title-index` 只装得下用户扫过的页（实测 1209 条），老片必然搜不到；
+   * 唯二支持「拼音当 wd」的源（量子、暴风）在大陆直连不通。所以加这一层：
+   * 拼音 → 中文片名走本地表，拿到中文名再去各源搜（中文 wd 是服务端 LIKE，覆盖全库）。
+   *
+   * 状态声明在远端那个 effect 之前：那个 effect 要读 `seedHits` 决定是否跳过远端。
+   */
+  const [seedHits, setSeedHits] = useState<string[]>([]);
+  const seedCache = useRef(new Map<string, string[]>());
+  const seedNeedle = useRef('');
+  // 远端 effect 要读「种子表这次输入有没有命中」，但不能把 seedHits 放进依赖数组：
+  // 那会让「敲键 → 打远端（380ms 节流）」在种子结果落地时被打断重跑一次。
+  // 用 ref 同步镜像，effect 里读它即可。
+  const seedHitsRef = useRef(0);
+  seedHitsRef.current = seedHits.length;
+
   useEffect(() => {
     const needle = normalizeQuery(draft);
     liveNeedle.current = needle;
@@ -136,10 +155,23 @@ export function SearchPage({
     if (targets.length === 0) return;
     // 只有一个字母时先不打远端：命中太散，而且用户马上会继续敲
     if (needle.length < 2) return;
+    // 内置片库已经命中了就不必再等远端：那两个「支持拼音当 wd」的源（量子、暴风）
+    // 在大陆直连基本不通，打了也是白等满 8 秒超时，还把表头一直挂在「正在补全…」。
+    // 种子表没命中时才让远端兜底——那时确实没有别的办法。
+    //
+    // 用 ref 而不是 state：种子查询本身是同步内存查找（走 IPC 往返后立刻返回），
+    // 若把它放进依赖数组，命中结果一落地就会让这个 effect 重跑一遍、把在途请求
+    // 全部 abort 重启，白白多等一个节流窗口。定时器回调里再判一次，防种子
+    // 恰好晚于节流窗口落地的情况。
+    if (seedHitsRef.current > 0) return;
 
     if (remoteTimer.current !== null) window.clearTimeout(remoteTimer.current);
     remoteTimer.current = window.setTimeout(() => {
       remoteTimer.current = null;
+      if (seedHitsRef.current > 0) {
+        // 这 380ms 里种子表命中了，远端没有存在意义了
+        return;
+      }
       remoteAbort.current?.abort();
       const controller = new AbortController();
       remoteAbort.current = controller;
@@ -187,6 +219,60 @@ export function SearchPage({
 
   // 索引是否已有内容：`pool` 由 subscribeIndex 驱动，索引长大后这里会跟着变。
   const indexReady = pool.length > 0;
+
+  /* ----------------------- 内置片库（老片兜底） ----------------------- */
+
+  // 状态本身声明在上面（远端那个 effect 要读 seedHits），这里只用。
+  useEffect(() => {
+    const needle = normalizeQuery(draft);
+    seedNeedle.current = needle;
+    if (needle.length < 2) {
+      setSeedHits([]);
+      return;
+    }
+    const cached = seedCache.current.get(needle);
+    if (cached) {
+      setSeedHits(cached);
+      return;
+    }
+    let alive = true;
+    void seedLookup(needle, 200).then((names) => {
+      if (!alive || seedNeedle.current !== needle) return;
+      if (seedCache.current.size >= REMOTE_CACHE_LIMIT && !seedCache.current.has(needle)) {
+        const oldest = seedCache.current.keys().next();
+        if (!oldest.done) seedCache.current.delete(oldest.value);
+      }
+      seedCache.current.set(needle, names);
+      setSeedHits(names);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [draft]);
+
+  /**
+   * 把种子命中并进建议列表。
+   *
+   * 排序让步给那份**有源**的条目：同名时索引里那条已经有海报/年份/能直接进详情，
+   * 种子那条只能发网络搜索。所以先按名字去重（索引优先），再追加种子独有的。
+   */
+  const mergedSuggestions: SuggestionGroup[] = useMemo(() => {
+    if (seedHits.length === 0) return suggestions;
+    const taken = new Set(suggestions.map((g) => normalizeQuery(g.name)));
+    const extra: SuggestionGroup[] = [];
+    for (const name of seedHits) {
+      const key = normalizeQuery(name);
+      if (taken.has(key)) continue;
+      taken.add(key);
+      extra.push({
+        key: `seed:${name}`,
+        name,
+        initials: pinyinInitials(name),
+        entries: [],
+      });
+    }
+    return [...suggestions, ...extra];
+  }, [suggestions, seedHits]);
 
   /* -------------------------------- 搜索结果 -------------------------------- */
 
@@ -452,16 +538,16 @@ export function SearchPage({
               {remoteLoading
                 ? '正在补全网关片库…'
                 : draft.trim()
-                  ? `${suggestions.length} 部匹配`
+                  ? `${mergedSuggestions.length} 部匹配`
                   : indexReady
                     ? '本地索引已就绪'
                     : '索引后台构建中'}
             </span>
           </div>
 
-          {suggestions.length > 0 ? (
+          {mergedSuggestions.length > 0 ? (
             <div className="suggest-rows">
-              {suggestions.map((group) => (
+              {mergedSuggestions.map((group) => (
                 <button
                   key={group.key}
                   type="button"

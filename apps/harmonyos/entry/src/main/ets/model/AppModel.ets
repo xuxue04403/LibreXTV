@@ -7,6 +7,7 @@
  * 单一版本号最省事也不会漏刷新）。
  */
 import { common } from '@kit.AbilityKit';
+import { bundleManager } from '@kit.AbilityKit';
 import {
   AppData,
   AppSettings,
@@ -147,6 +148,14 @@ export class AppModel {
   private storage: Storage = new Storage();
   private started: boolean = false;
   version: number = 0;
+  /**
+   * 安装包的版本号（如 `1.3.15`）。
+   *
+   * 从 bundleManager 读而不是写死在设置页里：写死会随发版漂移
+   * （实测设置页曾长期停在 `1.3.11`，比安装包落后三个版本）。
+   * 读不到时留空串，界面上就只显示应用名。
+   */
+  appVersion: string = '';
 
   /** 应用启动时调用一次 */
   async start(context: common.UIAbilityContext): Promise<void> {
@@ -154,6 +163,7 @@ export class AppModel {
       return;
     }
     this.started = true;
+    this.appVersion = await readAppVersion(context);
     await this.storage.init(context);
     const stored = this.storage.loadSync();
     const text = await readDefaultsText(context);
@@ -724,6 +734,22 @@ export class AppModel {
 export class HomeRowData {
   title: string = '';
   items: SearchItem[] = [];
+}
+
+/**
+ * 读安装包版本号。
+ *
+ * `getBundleInfoForSelf` 是同步 API（鸿蒙 4.0+），拿到的 `versionName` 就是
+ * `AppScope/app.json5` 里那个值。任何异常都吞掉返回空串——版本号显示不出来
+ * 不该影响启动。
+ */
+function readAppVersion(context: common.UIAbilityContext): string {
+  try {
+    const info = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+    return info.versionName ?? '';
+  } catch (err) {
+    return '';
+  }
 }
 
 function collectLiveGroups(channels: LiveChannel[]): string[] {

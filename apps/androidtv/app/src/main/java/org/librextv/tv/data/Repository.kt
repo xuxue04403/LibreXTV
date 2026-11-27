@@ -60,6 +60,17 @@ private const val PINYIN_WARM_BUDGET_MS = 60_000L
 private val REMOTE_PINYIN_MATCHERS = listOf("lziapi.com", "bfzyapi.com")
 
 /**
+ * 内置种子表条目的占位源 key。
+ *
+ * 这些条目没有真实的 vodId / sourceUrl ——点下去是拿中文片名去各源搜一次，
+ * 不是直接进详情。用固定 key 便于界面区分「能直接播的」与「要再搜一次的」。
+ */
+const val SEED_SOURCE_KEY = "seed"
+
+/** 种子条目的来源名（建议行右侧显示） */
+const val SEED_SOURCE_NAME = "内置片库"
+
+/**
  * 业务仓库：把「抓取 + 解析」封装成挂起函数。
  * 桌面端由 packages/core 承担同一职责，两端行为保持一致。
  */
@@ -100,10 +111,10 @@ class Repository(private val net: Net = Net) {
     fun suggestTitles(query: String, limit: Int = 12): List<SearchItem> {
         val word = query.trim().lowercase()
         if (word.isEmpty()) return emptyList()
-        val snapshot = seenSnapshot()
-        if (snapshot.isEmpty()) return emptyList()
         val byPinyin = Pinyin.isQuery(word)
-        return snapshot
+
+        // 先查「带源的本地索引」——这些条目点下去能直接进详情，优先展示。
+        val indexed = seenSnapshot()
             .asSequence()
             .filter { item ->
                 // 标题包含（中文/英文都走这条）或首字母命中，任一条成立就算候选
@@ -111,15 +122,44 @@ class Repository(private val net: Net = Net) {
             }
             // 同一部片跨源只留一条：建议行点下去只用来填词，不需要每个源一行
             .distinctBy { it.name }
-            .sortedWith(
-                compareByDescending<SearchItem> { Pinyin.score(it.name, word) }
-                    .thenByDescending { it.name.length <= word.length + 6 }
-                    .thenBy { it.name.length }
-                    .thenBy { it.name },
-            )
+            .sortedWith(SUGGEST_ORDER(word))
             .take(limit)
             .toList()
+
+        if (!SeedTitles.ready) return indexed
+
+        // 再补内置种子表：本地索引只装得下用户扫过的那几页（实测 1209 条 / 全站 150 万条），
+        // 老片和冷门片全都不在里面。种子表有约 10 万个真实片名，敲 qmmk 才能真的找到东西。
+        // 这些条目没有 vodId/sourceKey —— 点下去是按中文名去各源搜一次（中文 wd 是服务端
+        // LIKE，覆盖全库、不受分页深度限制），所以 [SEED_SOURCE_KEY] 只是个占位。
+        val have = indexed.mapTo(HashSet(indexed.size)) { it.name }
+        val seeded = SeedTitles.lookup(word, limit * 6)
+            .asSequence()
+            .filter { it !in have }
+            .sortedWith(
+                compareByDescending<String> { Pinyin.score(it, word) }
+                    .thenBy { it.length }
+                    .thenBy { it },
+            )
+            .take((limit - indexed.size).coerceAtLeast(0))
+            .map { name ->
+                SearchItem(
+                    sourceKey = SEED_SOURCE_KEY,
+                    sourceName = SEED_SOURCE_NAME,
+                    vodId = "",
+                    name = name,
+                )
+            }
+            .toList()
+
+        return indexed + seeded
     }
+
+    /** 建议排序：拼音分高的在前，同分时短片名优先（`斗罗大陆` 比 `斗罗大陆之绝世唐门` 更像目标） */
+    private fun SUGGEST_ORDER(word: String) = compareByDescending<SearchItem> { Pinyin.score(it.name, word) }
+        .thenByDescending { it.name.length <= word.length + 6 }
+        .thenBy { it.name.length }
+        .thenBy { it.name }
 
     fun rememberItems(items: List<SearchItem>) {
         synchronized(seenLock) {

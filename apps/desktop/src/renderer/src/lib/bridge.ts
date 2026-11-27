@@ -50,6 +50,33 @@ export function appInfo(): AppInfo {
   return info;
 }
 
+/**
+ * 内置片库（拼音首字母 → 中文片名）查询。
+ *
+ * 走主进程而不是渲染层直接读：渲染层是 `sandbox: true` + `nodeIntegration: false`，
+ * 拿不到 `fs` 也解不了 gzip。浏览器预览（没有 preload）时退回空表，搜索行为退化成
+ * 只用本地索引——与加片库之前完全一致，不会崩。
+ */
+export async function seedLookup(needle: string, limit = 200): Promise<string[]> {
+  if (!window.librextv) return [];
+  try {
+    const res = await window.librextv.seedLookup(needle, limit);
+    return res.ok ? res.names : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 内置片库是否已就绪（诊断用） */
+export async function seedInfo(): Promise<{ ready: boolean; size: number }> {
+  if (!window.librextv) return { ready: false, size: 0 };
+  try {
+    return await window.librextv.seedInfo();
+  } catch {
+    return { ready: false, size: 0 };
+  }
+}
+
 const fetchHttp = createFetchHttp();
 
 let streamSeq = 0;

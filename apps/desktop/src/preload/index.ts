@@ -106,8 +106,7 @@ const bridge = {
   ): Promise<{ ok: boolean; items: BridgeRecommendItem[]; error?: string; fetchedAt?: number }> =>
     ipcRenderer.invoke('recommend:fetch', query),
   /** 画质探测：主进程抓 m3u8 / 分片前缀并解析，渲染层只拿结论 */
-  qualityProbe: (input: {
-    source: { key: string; name: string; url: string; detail?: string; isAdult?: boolean };
+  qualityProbe: (input: {    source: { key: string; name: string; url: string; detail?: string; isAdult?: boolean };
     vodId: string;
   }): Promise<{
     ok: boolean;
@@ -118,6 +117,15 @@ const bridge = {
     retryable: boolean;
     cached: boolean;
   }> => ipcRenderer.invoke('quality:probe', input),
+  /**
+   * 内置片库（拼音首字母 → 中文片名）。
+   *
+   * 渲染层 `sandbox: true` + `nodeIntegration: false`，读不了磁盘也解不了 gzip，
+   * 所以表在主进程；这里只拿片名数组。
+   */
+  seedLookup: (needle: string, limit?: number): Promise<{ ok: boolean; names: string[] }> =>
+    ipcRenderer.invoke('seed:lookup', needle, limit),
+  seedInfo: (): Promise<{ ready: boolean; size: number }> => ipcRenderer.invoke('seed:info'),
   toggleFullscreen: (): Promise<boolean> => ipcRenderer.invoke('window:toggle-fullscreen'),
   setFullscreen: (value: boolean): Promise<boolean> => ipcRenderer.invoke('window:set-fullscreen', value),
   isFullscreen: (): Promise<boolean> => ipcRenderer.invoke('window:is-fullscreen'),

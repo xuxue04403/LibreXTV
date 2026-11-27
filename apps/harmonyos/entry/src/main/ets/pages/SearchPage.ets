@@ -53,7 +53,7 @@ export struct SearchPage {
     Column() {
       // 搜索框
       Row({ space: 8 }) {
-        TextInput({ text: this.keyword, placeholder: '片名、剧名、演员或拼音首字母' })
+        TextInput({ text: this.keyword, placeholder: '片名、剧名或演员名' })
           .layoutWeight(1)
           .height(42)
           .fontSize(14)
@@ -115,7 +115,7 @@ export struct SearchPage {
               Column() {
                 EmptyBox({
                   title: '搜点什么吧',
-                  description: '支持片名、剧名、演员名，也支持拼音首字母（如 qyn → 庆余年）',
+                  description: '支持片名、剧名、演员名',
                 })
               }
               .width('100%')

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { primeSeedTitles, lookupSeed, seedReady, seedSize } from '@librextv/core/seed-titles';
 import { startMediaProxy, assertAllowedTarget, fetchChecked, readLimited, type MediaProxy } from './proxy';
 import { castToDevice, discoverDevices, parseDeviceDescription, stopCast, type DlnaDevice } from './dlna';
 import { fetchRecommend } from './recommend';
@@ -216,6 +217,24 @@ ipcMain.handle('recommend:fetch', async (_event, input: unknown) => {
     };
   }
 });
+
+/**
+ * 内置片库（拼音首字母 → 中文片名）查询。
+ *
+ * 渲染层是 `sandbox: true` + `nodeIntegration: false`，读不了磁盘也解不了 gzip，
+ * 所以种子表只能留在主进程。这里只回传片名数组，不带任何可执行内容。
+ */
+ipcMain.handle('seed:lookup', (_event, needle: unknown, limit: unknown) => {
+  if (typeof needle !== 'string' || !needle.trim()) return { ok: true as const, names: [] as string[] };
+  const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.min(Math.max(1, limit), 500) : 200;
+  try {
+    return { ok: true as const, names: lookupSeed(needle, n) };
+  } catch {
+    return { ok: true as const, names: [] as string[] };
+  }
+});
+
+ipcMain.handle('seed:info', () => ({ ready: seedReady(), size: seedSize() }));
 
 /**
  * 画质探测：渲染层传源配置与影片 ID，主进程负责抓播放列表/分片前缀。
@@ -567,6 +586,9 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     app.setAppUserModelId('org.librextv.desktop');
+    // 内置片库在主进程预热：解 gzip + 算 22 万条片名的首字母大约 1 秒，
+    // 放到渲染层就阻塞首屏了；且渲染层拿不到 fs。
+    void primeSeedTitles();
     proxy = await startMediaProxy();
     buildMenu();
     createWindow();

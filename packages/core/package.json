@@ -5,6 +5,11 @@
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./seed-titles": "./src/seed-titles.ts",
+    "./*": "./src/*.ts"
+  },
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "typecheck": "tsc --noEmit"

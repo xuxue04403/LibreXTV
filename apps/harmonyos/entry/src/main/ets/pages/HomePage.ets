@@ -67,7 +67,7 @@ export struct HomePage {
       Row({ space: 8 }) {
         Text('🔍')
           .fontSize(14)
-        Text('搜索片名、剧名、演员或拼音首字母')
+        Text('搜索片名、剧名或演员名')
           .fontSize(13)
           .fontColor(Palette.TextMuted)
           .layoutWeight(1)
