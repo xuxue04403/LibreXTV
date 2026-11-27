@@ -261,7 +261,8 @@ DetailPanel 打开
 
 搜索是最容易被「一两个坏源」拖垮的地方：每个请求都要等满超时，用户看到的是转圈而不是结果。桌面端在 store 里维护 `sourceHealth`：
 
-- 连续失败 2 次暂停；恢复时长阶梯 30 分钟 → 24 小时 → 永久（再失败一次进入永久，只能手动恢复）。
+- 连续失败 2 次暂停 30 分钟；再连续失败 2 次仍停 30 分钟，第三次进入永久（只能手动恢复）。
+  第二档原本是 24 小时，实测太长：源站多数是抖动而非真死，挂一次整天搜不到片，用户只能手动恢复。
 - **暂停只影响搜索**，不改动用户勾选；暂停期内不重复累计，到期后失败计数从 1 重新开始，成功一次降一级。
 - 搜索页顶部列出「源名 · 剩 N 分钟 · 恢复」，全暂停时给空态与恢复入口；7 天未参与搜索的普通条目清理，但仍在暂停期的条目保留。
 - 纯逻辑在 `packages/core/src/health.ts`，TV 端未接。
@@ -884,7 +885,7 @@ iptv 列表的特性：频道地址随时会挂，且很多挂掉的地址返回
 
 暴风和百度因此被加入清单（`version` 3）。同时把「地区限制」和「源失效」在文案上区分开：前者是目标站明确拒绝，后者是拿不到地址。
 
-**2026-11 复测更新（`version` 7）**：如意资源这层判断至今成立，但它的全部已知域名（`cj.rycjapi.com`、`ryzyapi.com`、`rycjzy.com`、`ruyizy.com`、`api./js./caiji./www.` 子域与 http 版）在中国移动宽带下都已 `ECONNRESET`，属于彻底不可达；由于它占着 `builtin_7` 这个下标，**保留原位不删**，靠 `packages/core/src/health.ts` 的 `SOURCE_HEALTH_FAIL_THRESHOLD = 2`（连挂两次自动停用 30 分钟、再挂 24 小时）兜底，用户不会一直等它。同一轮实测还发现：魔都资源原 `caiji.moduapi.cc` 与红牛资源原 `www.hongniuzy2.com` 均被按域名重置，分别换成同站点的新域名 `www.mdzyapi.com` 与 `www.hongniuzy3.com`（片库不变，走 `freshByKey` 换址替换）。
+**2026-11 复测更新（`version` 7）**：如意资源这层判断至今成立，但它的全部已知域名（`cj.rycjapi.com`、`ryzyapi.com`、`rycjzy.com`、`ruyizy.com`、`api./js./caiji./www.` 子域与 http 版）在中国移动宽带下都已 `ECONNRESET`，属于彻底不可达；由于它占着 `builtin_7` 这个下标，**保留原位不删**，靠 `packages/core/src/health.ts` 的 `SOURCE_HEALTH_FAIL_THRESHOLD = 2`（连挂两次停用 30 分钟、再挂仍 30 分钟、第三次永久）兜底，用户不会一直等它。同一轮实测还发现：魔都资源原 `caiji.moduapi.cc` 与红牛资源原 `www.hongniuzy2.com` 均被按域名重置，分别换成同站点的新域名 `www.mdzyapi.com` 与 `www.hongniuzy3.com`（片库不变，走 `freshByKey` 换址替换）。
 
 **GitHub 托管的源必须换镜像**：关掉代理后 `raw.githubusercontent.com` 与 `cdn.jsdelivr.net` 在国内一律 TLS 握手被重置，整份清单都下不下来（表现为「加载失败」，不是「频道打不开」）。可用替代是 jsDelivr 的备用域名 `fastly.jsdelivr.net`（约 0.9s）、`testingcf.jsdelivr.net`（约 1.0s）与 `gcore.jsdelivr.net`（约 1.5s）；GitHub 反代（ghfast.top、ghproxy.net、gh.llkk.cc、ghp.ci 等十余个）实测全部不可用。注意 jsDelivr 路径必须写全 `gh/user/repo@branch/path`，漏掉 `@branch` 会 404。`iptv-org` 是 GitHub Pages 而非仓库文件，只能走 `iptv-org.github.io`。
 

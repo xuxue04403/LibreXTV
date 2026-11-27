@@ -201,6 +201,13 @@ data class AppData(
     val defaultsVersion: Int = 0,
     /** 用户主动删掉的内置源地址：升级补源时不要又把它们塞回来 */
     val removedDefaultUrls: List<String> = emptyList(),
+    /**
+     * 最近搜索过的片名（最新的在前）。
+     *
+     * 与 [history] 分开：观看记录里全是「看过的」，而用户想重搜的往往是「上次没找到的」。
+     * 电视端遥控器打字成本高，这六个词就是免输入重搜的入口，桌面端同样有这份列表。
+     */
+    val recentSearches: List<String> = emptyList(),
 ) {
     fun activeSources(): List<VodSource> = sources.filter { it.key in selected }
     fun activeLiveSources(): List<LiveSource> = liveSources.filter { it.key in liveSelected }

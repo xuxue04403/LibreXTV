@@ -51,7 +51,7 @@ describe('source health 基础状态', () => {
     expect(entry.disabledUntil).toBe(0);
   });
 
-  it('第二次暂停 24 小时，第三次永久', () => {
+  it('第二次暂停 30 分钟，第三次永久', () => {
     const disableOnce = () => recordSourceFailure(recordSourceFailure(undefined, NOW).entry, NOW).entry;
 
     const first = disableOnce();
@@ -119,7 +119,7 @@ describe('source health 清理与提示', () => {
 
   it('停用提示文案', () => {
     expect(describeSourceDisable(1)).toContain('30 分钟');
-    expect(describeSourceDisable(2)).toContain('24 小时');
+    expect(describeSourceDisable(2)).toContain('30 分钟');
     expect(describeSourceDisable(3)).toContain('永久');
     expect(describeDisabledRemaining(undefined, NOW)).toBe('');
     expect(describeDisabledRemaining({ failStreak: 0, disableCount: 1, disabledUntil: NOW + 5 * 60000, updatedAt: NOW }, NOW)).toBe('剩 5 分钟');

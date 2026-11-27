@@ -163,6 +163,14 @@ private const val FAVORITE_LIMIT = 500
 private const val WARM_INDEX_THRESHOLD = 3_000
 
 /**
+ * 最近搜索保留几条。
+ *
+ * 与桌面端一致取 8：电视上一屏放得下一行 6~8 个胶囊，再多就得横向翻页，
+ * 而翻页的成本已经接近重新敲两个字母了。
+ */
+private const val RECENT_SEARCH_LIMIT = 8
+
+/**
  * 目录落盘的合并窗口。
  *
  * 一轮 refreshCatalog 会写 8+1 次快照，每份序列化约 557KB 且 DataStore 是整文件
@@ -892,6 +900,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // 后台预热会给 FIFO 闸门塞几十个请求，用户检索必须插到前面去
         warmJob?.cancel()
         search = SearchUi(keyword = word, loading = true, searched = true)
+        rememberSearchWord(word)
         // 序号守卫：取消是协作式的，被取消的那一轮仍可能跑到 collect 之后的
         // 「收尾」语句（loading=false、写缓存、落拼音索引），把新一次检索的
         // 状态改掉。只有号码最新的那一轮才允许收尾。
@@ -1028,6 +1037,136 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (snapshot.size < persistedIndexSize + 80) return
         persistedIndexSize = snapshot.size
         viewModelScope.launch { runCatching { store.savePinyinIndex(snapshot) } }
+    }
+
+    /**
+     * 记一条最近搜索。
+     *
+     * 「先删再放」把重复词挪到最前（与桌面端 `addRecentSearch` 同一语义）：用户重搜
+     * 上一次的词说明它最重要，留在列表末尾等于得横滚到底才能按到。
+     */
+    private fun rememberSearchWord(word: String) {
+        val clean = word.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                store.update { data ->
+                    data.copy(
+                        recentSearches = (listOf(clean) + data.recentSearches.filter { it != clean })
+                            .take(RECENT_SEARCH_LIMIT),
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearRecentSearches() {
+        viewModelScope.launch { runCatching { store.update { it.copy(recentSearches = emptyList()) } } }
+    }
+
+    /**
+     * 只重试一个失败的源。
+     *
+     * 桌面端一直有这条路径（结果区失败 chip 点一下就单独重试），电视端此前只能整轮重搜：
+     * 一个源超时就把已经拿到的十几部片全部清空重来，在盒子上要再等十几秒。
+     * 这里只补这一个源的结果，其它源与已有结果保持不动。
+     *
+     * @param sourceKey 要重试的源 key（来自 [SearchUi.outcomes]）
+     */
+    fun retrySource(sourceKey: String) {
+        val word = search.keyword.trim()
+        if (word.isEmpty()) return
+        // 拼音与缓存是伪造的「源」，没有可重试的采集接口；重试它们只会得到同一个结果
+        if (sourceKey == PINYIN_SOURCE_KEY || sourceKey == CACHE_SOURCE_KEY) return
+        val source = _data.value.activeSources().firstOrNull { it.key == sourceKey }
+        if (source == null) {
+            showToast("这个源已不在启用列表里")
+            return
+        }
+        val mySeq = searchSeq
+        viewModelScope.launch {
+            // 重试期间把那一条标成「重试中」：不改 loading（整轮并没有在跑），
+            // 只把该源的条目替换成一个占位，让用户看到反应。
+            search = search.copy(
+                outcomes = search.outcomes.map {
+                    if (it.sourceKey == sourceKey) it.copy(ok = true, error = null, items = emptyList()) else it
+                },
+            )
+            val outcome = runCatching { repo.search(source, word, maxPages = 2) }.getOrNull() ?: return@launch
+            // 用户可能在重试期间又搜了别的词：序号对不上就丢弃这次结果
+            if (mySeq != searchSeq) return@launch
+            val filt = Parsers.filterAdult(Parsers.filterRelevant(outcome.items, word), _data.value.settings.adultFilter)
+            val merged = search.outcomes.map {
+                if (it.sourceKey == sourceKey) outcome.copy(items = filt) else it
+            }
+            search = search.copy(
+                outcomes = merged,
+                groups = Parsers.group(merged.filter { it.ok }.flatMap { it.items }),
+            )
+        }
+    }
+
+    /**
+     * 按「首字母建议」发起一次检索。
+     *
+     * 与 [startSearch] 的区别只有两处：用建议的**中文片名**作为检索词（采集站的 `wd`
+     * 只认中文 LIKE，拿首字母去搜只有量子/暴风两个源认），同时先把索引里已有的条目
+     * 立刻铺到结果区 —— 网络回来之前界面上就有片子，点进去就能播。
+     *
+     * @param name 建议行显示的中文片名
+     * @param seed 索引里属于这部片的条目（可空：远端补出来的建议没有本地 vodId）
+     */
+    fun searchSuggestion(name: String, seed: List<SearchItem>) {
+        val word = name.trim()
+        if (word.isEmpty()) return
+        searchJob?.cancel()
+        warmJob?.cancel()
+        val mySeq = ++searchSeq
+        rememberSearchWord(word)
+        // 先把索引条目铺上去：它们是真实可点的（带 sourceKey + vodId），
+        // 用户此刻按 OK 就能进详情，不必等采集站回话。
+        search = SearchUi(
+            keyword = word,
+            loading = true,
+            searched = true,
+            outcomes = listOf(
+                SourceOutcome(
+                    sourceKey = CACHE_SOURCE_KEY,
+                    sourceName = "本地索引",
+                    ok = true,
+                    items = seed,
+                ),
+            ),
+            groups = Parsers.group(seed),
+            fromCache = seed.isNotEmpty(),
+        )
+        searchJob = viewModelScope.launch {
+            val sources = _data.value.activeSources()
+            if (sources.isEmpty()) {
+                search = search.copy(loading = false)
+                showToast("还没有启用任何点播源，请在设置中添加")
+                return@launch
+            }
+            val adultFilter = _data.value.settings.adultFilter
+            repo.searchAll(sources, word, adultFilter)
+                .catch { e ->
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                }
+                .collect { outcome ->
+                    if (mySeq != searchSeq) return@collect
+                    val outcomes = search.outcomes.filter { it.sourceKey != outcome.sourceKey } + outcome
+                    val items = outcomes.filter { it.ok }.flatMap { it.items }
+                    search = search.copy(
+                        outcomes = outcomes,
+                        groups = Parsers.group(items),
+                        loading = outcomes.count { it.sourceKey != CACHE_SOURCE_KEY } < sources.size,
+                        fromCache = false,
+                    )
+                }
+            if (mySeq != searchSeq) return@launch
+            search = search.copy(loading = false)
+            persistPinyinIndex()
+        }
     }
 
     fun openDetail(group: SearchGroup, item: SearchItem) {

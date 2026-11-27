@@ -98,7 +98,7 @@ GitHub 反代实测全部不可用：`ghfast.top`、`ghproxy.net`、`gh.llkk.cc`
 | 11 | 新浪资源 | `https://api.xinlangapi.com/xinlangapi.php/provide/vod` | 新增（路径是 `xinlangapi.php`） |
 | 12 | 光速资源 | `https://api.guangsuapi.com/api.php/provide/vod` | 新增 |
 
-**如意资源为什么不删**：它的全部已知域名（`cj.rycjapi.com`、`ryzyapi.com`、`rycjzy.com`、`ruyizy.com`、`ryapi.cc`、`rycjapi1.com`、`rycjzyapi.com`、`ryysapi.com`、`api./js./caiji./www.` 子域、http 版）在国内都是 `ECONNRESET`，确实死透了。但它占着 `builtin_7` 这个下标，删掉会让 8~12 全部前移。保留原位 + 靠 `packages/core/src/health.ts` 的 `SOURCE_HEALTH_FAIL_THRESHOLD = 2`（连挂两次停 30 分钟、再挂 24 小时）自动兜底，用户不会一直等它。
+**如意资源为什么不删**：它的全部已知域名（`cj.rycjapi.com`、`ryzyapi.com`、`rycjzy.com`、`ruyizy.com`、`ryapi.cc`、`rycjapi1.com`、`rycjzyapi.com`、`ryysapi.com`、`api./js./caiji./www.` 子域、http 版）在国内都是 `ECONNRESET`，确实死透了。但它占着 `builtin_7` 这个下标，删掉会让 8~12 全部前移。保留原位 + 靠 `packages/core/src/health.ts` 的 `SOURCE_HEALTH_FAIL_THRESHOLD = 2`（连挂两次停 30 分钟、再挂仍 30 分钟、第三次永久）自动兜底，用户不会一直等它。
 
 ### 直播 7 个
 

@@ -2,10 +2,11 @@
  * 源健康度：连续失败自动暂停，避免每次搜索都先等一个已经死掉的源。
  *
  * 规则（与上游 LibreTV 的 sourceHealth 对齐）：
- * - 连续失败 2 次进入暂停；暂停时长逐级加长：30 分钟 → 24 小时 → 永久；
+ * - 连续失败 2 次进入暂停；暂停时长 30 分钟，第二次仍失败再停 30 分钟，第三次永久；
  * - 暂停到期后第一次再失败，失败计数从 1 重新累计（不会一次失败就再次长期停用）；
  * - 成功一次把停用等级降一级，但不一次性清零：刚恢复的源再挂一次，
- *   应该按上一级时长继续停，而不是又从头给 30 分钟；
+ *   应该按已经积累的等级继续往上走，而不是退回新手保护；否则「抖一下—成功—再抖」
+ *   能无限循环，永远升级不到永久停用，死源会一直拖慢每次搜索。
  * - 暂停只影响「搜索时是否发起请求」，不改用户勾选 —— 勾选是用户的意图，
  *   暂停只是临时事实，恢复后不该要求用户重新去设置里打勾。
  *
@@ -16,8 +17,14 @@
 /** 连续失败达到这个次数就暂停 */
 export const SOURCE_HEALTH_FAIL_THRESHOLD = 2;
 
-/** 第 1、2 次暂停的时长；第 3 次起永久，需手动恢复 */
-export const SOURCE_HEALTH_LADDER_MS = [30 * 60 * 1000, 24 * 60 * 60 * 1000] as const;
+/**
+ * 第 1、2 次暂停的时长；第 3 次起永久，需手动恢复。
+ *
+ * 第 2 档原本是 24 小时，实际用下来太长：源站大多是抖动而不是真死，
+ * 挂一次 24 小时等于整天搜不到片，用户只能去设置里手动恢复。
+ * 两档统一成 30 分钟——抖动自愈就能继续用，真死的源也不过每次多等半小时。
+ */
+export const SOURCE_HEALTH_LADDER_MS = [30 * 60 * 1000, 30 * 60 * 1000] as const;
 
 /** 7 天没参与过搜索的普通条目清理 */
 export const SOURCE_HEALTH_STALE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -28,7 +35,7 @@ export const SOURCE_HEALTH_PERMANENT = Number.MAX_SAFE_INTEGER;
 export interface SourceHealthEntry {
   /** 连续失败次数（成功或已暂停时归零） */
   failStreak: number;
-  /** 已累计的停用等级：1=30 分钟，2=24 小时，3=永久 */
+  /** 已累计的停用等级：1=暂停，2=再次暂停，3=永久 */
   disableCount: number;
   /** 暂停到什么时候；0 表示正常。永久的值为 SOURCE_HEALTH_PERMANENT */
   disabledUntil: number;
@@ -119,7 +126,7 @@ export function pruneSourceHealth(map: SourceHealthMap, now: number): SourceHeal
   for (const [key, entry] of Object.entries(map)) {
     const permanent = entry.disabledUntil === SOURCE_HEALTH_PERMANENT;
     // 暂停中的条目 updatedAt 停在「暂停那一刻」，不能只看 age：
-    // 24 小时档第二天再看就被清掉的话，暂停会凭空失效。
+    // 暂停期还没过就被清掉的话，暂停会凭空失效。
     if (!permanent && !isSourceDisabled(entry, now) && now - entry.updatedAt > SOURCE_HEALTH_STALE_MS) {
       changed = true;
       continue;
@@ -131,15 +138,24 @@ export function pruneSourceHealth(map: SourceHealthMap, now: number): SourceHeal
 
 /** 暂停时长的中文描述（用于 toast / 列表提示） */
 export function describeSourceDisable(level: number): string {
-  if (level >= 3) return '已永久暂停';
-  if (level === 2) return '暂停 24 小时';
-  return '暂停 30 分钟';
+  if (level > SOURCE_HEALTH_LADDER_MS.length) return '已永久暂停';
+  // 抽到 formatDurationTail 里，和「剩 N 分钟」用同一套换算：改阶梯常量时文案自动跟上，
+  // 不会再出现「代码已经改了、提示还写着 24 小时」。
+  return `暂停 ${formatDurationTail(SOURCE_HEALTH_LADDER_MS[Math.max(0, level - 1)])}`;
 }
 
 /** 剩余暂停时间的简短描述（用于源列表徽章） */
 export function describeDisabledRemaining(entry: SourceHealthEntry | undefined, now: number): string {
   if (!entry || entry.disabledUntil <= now) return '';
   if (entry.disabledUntil === SOURCE_HEALTH_PERMANENT) return '已暂停';
-  const minutes = Math.ceil((entry.disabledUntil - now) / 60000);
-  return minutes >= 60 ? `剩 ${Math.ceil(minutes / 60)} 小时` : `剩 ${minutes} 分钟`;
+  return `剩 ${formatDurationTail(entry.disabledUntil - now)}`;
+}
+
+/** 把毫秒档位转成「30 分钟」「1.5 小时」这类中文尾串（向上取整，宁可多说不说少） */
+function formatDurationTail(ms: number): string {
+  const minutes = Math.ceil(ms / 60000);
+  if (minutes < 60) return `${minutes} 分钟`;
+  // 90 分钟写「1.5 小时」比「2 小时」准确，用户对「说停 2 小时结果 90 分钟就恢复」更在意
+  const hours = Number((minutes / 60).toFixed(1));
+  return `${hours} 小时`;
 }
