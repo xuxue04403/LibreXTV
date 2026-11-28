@@ -124,8 +124,11 @@ export struct SettingsPage {
                 primary: true,
                 disabled: appModel.importing,
                 onTap: () => {
-                  appModel.importSubscription(this.subUrl);
-                  this.subUrl = '';
+                  // 不 await 就清空会让用户看不到输入是否被接受（校验失败时
+                  // 输入框已经空了，只能从头再敲一遍）。等结果出来再清。
+                  appModel.importSubscription(this.subUrl).then(() => {
+                    this.subUrl = '';
+                  });
                 },
               })
             }

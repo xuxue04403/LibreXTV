@@ -18,7 +18,7 @@ import {
 } from '../model/Types';
 import { parseM3u } from './M3u';
 import { dedupeItems, filterRelevantItems } from './Relevance';
-import { filterAdultItems } from './AdultFilter';
+import { filterAdultItems, isAdultChannelName } from './AdultFilter';
 import { originOf } from './UrlUtil';
 
 /** 单源搜索死线：超过就放弃这个源，不能让一个死源拖住整个搜索 */
@@ -257,9 +257,11 @@ export async function loadLiveOne(source: LiveSource, timeoutMs: number = LIVE_T
   try {
     const text = await getText(source.url, { timeoutMs: timeoutMs });
     const channels = parseM3u(text, source.url, source.key, source.name);
+    // 直播链路也要过成人过滤：m3u 清单里混进的成人台此前会直接出现在网格里。
+    const kept = channels.filter((c: LiveChannel) => !isAdultChannelName(c.name, c.group));
     return {
-      channels: channels,
-      statuses: [{ sourceKey: source.key, sourceName: source.name, ok: true, count: channels.length }],
+      channels: kept,
+      statuses: [{ sourceKey: source.key, sourceName: source.name, ok: true, count: kept.length }],
       bytes: text.length,
     };
   } catch (err) {

@@ -15,7 +15,7 @@ import type {
   SourceConfig,
 } from './types';
 import { normalizeTitle } from './cms';
-import { clampEpisodeIndex } from './format';
+import { clampEpisodeIndex, hostnameOf } from './format';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   adultFilter: true,
@@ -299,7 +299,17 @@ function normalizeList<T>(raw: unknown, convert: (item: unknown) => T | null, li
   return out;
 }
 
-/** 源列表去重（按 url）+ 只保留 http(s) 地址 */
+/**
+ * 源列表去重（按 url）+ 只保留 http(s) 地址。
+ *
+ * **必须逐字段重建，不能 `{ ...obj, url }` 透传**：快照是用户手改/跨版本导入的
+ * 外部输入，`name` 缺失或不是字符串（`{"key":"a","url":"http://x","name":123}`）
+ * 会一路进入 `SourceConfig.name: string`。之后任何一次搜索结果渲染走
+ * `group.ts` 的 `a.sourceName.localeCompare(...)` 就抛 TypeError，聚合列表白屏，
+ * 而且状态已经落盘，重启后依旧白屏——用户只能清数据。同文件的
+ * `toHistoryEntry`/`toFavoriteEntry`/`toLiveFavoriteEntry` 都是逐字段重建的，
+ * 唯独这里漏了，属于同一条约定没贯彻到底。
+ */
 function normalizeSources<T extends SourceConfig | LiveSourceConfig>(raw: unknown): T[] {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
@@ -311,7 +321,14 @@ function normalizeSources<T extends SourceConfig | LiveSourceConfig>(raw: unknow
     const url = obj.url.trim();
     if (seen.has(url)) continue;
     seen.add(url);
-    out.push({ ...(obj as unknown as T), url });
+    const name = isNonEmptyString(obj.name) ? obj.name.trim() : hostnameOf(url);
+    const entry: Record<string, unknown> = { key: obj.key, name, url };
+    // 可选字段只在类型正确时带上；类型不对就当成没有，交给下游默认值
+    if (isHttpUrl(obj.detail)) entry.detail = obj.detail.trim();
+    if (obj.isAdult === true) entry.isAdult = true;
+    if (isNonEmptyString(obj.note)) entry.note = obj.note;
+    if (isNonEmptyString(obj.epg)) entry.epg = obj.epg.trim();
+    out.push(entry as unknown as T);
   }
   return out;
 }
@@ -346,16 +363,22 @@ export function parseSnapshot(text: string): AppSnapshot | null {
     return null;
   }
 
+  // 选中项必须和真实存在的源求交：导入一份删过源的旧快照时，残留的 key
+  // 会永远停留在「已选中」却对应不到任何源，设置页显示的启用数对不上、
+  // 搜索也不发请求，用户只会看到「明明勾着却搜不到」。
+  const vodKeys = new Set(sources.map((s) => s.key));
+  const liveKeys = new Set(liveSources.map((s) => s.key));
+
   return {
     version: 1,
     settings: normalizeSettings(obj.settings),
     sources,
     selectedKeys: Array.isArray(obj.selectedKeys)
-      ? obj.selectedKeys.filter((k): k is string => typeof k === 'string')
+      ? obj.selectedKeys.filter((k): k is string => typeof k === 'string' && vodKeys.has(k))
       : sources.map((s) => s.key),
     liveSources,
     liveSelectedKeys: Array.isArray(obj.liveSelectedKeys)
-      ? obj.liveSelectedKeys.filter((k): k is string => typeof k === 'string')
+      ? obj.liveSelectedKeys.filter((k): k is string => typeof k === 'string' && liveKeys.has(k))
       : [],
     history,
     favorites,

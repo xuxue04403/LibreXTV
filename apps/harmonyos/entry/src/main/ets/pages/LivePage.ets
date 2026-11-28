@@ -5,13 +5,25 @@
  * 所以同一个 CCTV1 只留排在最前面（可播率最高）的那个源。
  */
 import { appModel } from '../model/AppModel';
-import { LiveChannel, PageId } from '../model/Types';
+import { LiveChannel, LiveStatus, PageId } from '../model/Types';
 import { Palette, Poster, PillButton, HintLine, EmptyBox, SectionTitle } from '../view/Common';
+
+/** 把一个源的结算结果写成一行可读文字 */
+function liveStatusText(st: LiveStatus): string {
+  if (st.ok) {
+    return `${st.sourceName} · ${st.count} 台`;
+  }
+  const err = st.error !== undefined && st.error.length > 0 ? st.error : '失败';
+  return `${st.sourceName} · ${err}`;
+}
 
 @Component
 export struct LivePage {
   @StorageLink('vmVersion') vmVersion: number = 0;
   @State private keyword: string = '';
+  /** counts() 的缓存：见该方法注释 */
+  private groupCounts: Map<string, number> | null = null;
+  private countsFor: LiveChannel[] | null = null;
 
   aboutToAppear(): void {
     if (!appModel.live.loadedOnce && !appModel.live.loading) {
@@ -19,13 +31,25 @@ export struct LivePage {
     }
   }
 
+  /**
+   * 各分组的频道数。
+   *
+   * 结果缓存在 groupCounts 字段里，只在 channels 变成新数组时重算 ——
+   * 原来每个分组芯片渲染时都调一次 counts() 从头遍历整张表：
+   * 1500 个频道 × 40 个分组 ≈ 6 万次 Map 写入，一次重绘就卡住。
+   */
   private counts(): Map<string, number> {
+    if (this.groupCounts !== null && this.countsFor === appModel.live.channels) {
+      return this.groupCounts;
+    }
     const map = new Map<string, number>();
     map.set('全部', appModel.live.channels.length);
     for (let i = 0; i < appModel.live.channels.length; i++) {
       const g = appModel.live.channels[i].group ?? '未分组';
       map.set(g, (map.get(g) ?? 0) + 1);
     }
+    this.groupCounts = map;
+    this.countsFor = appModel.live.channels;
     return map;
   }
 
@@ -92,18 +116,20 @@ export struct LivePage {
       }
 
       // 各源结算情况
+      // statuses 是 LiveStatus 对象，不是字符串：直接 Text(st) 渲染出来是
+      // "[object Object]"，而且 key 也是对象（全都一样，ForEach 会报重复 key）。
       if (appModel.live.statuses.length > 0) {
         Scroll() {
           Row({ space: 6 }) {
-            ForEach(appModel.live.statuses, (st: string) => {
-              Text(st)
+            ForEach(appModel.live.statuses, (st: LiveStatus) => {
+              Text(liveStatusText(st))
                 .fontSize(10)
                 .fontColor(Palette.TextMuted)
                 .padding({ left: 8, right: 8, top: 4, bottom: 4 })
                 .backgroundColor(Palette.Panel)
                 .borderRadius(999)
                 .border({ width: 1, color: Palette.Line })
-            }, (st: string) => st)
+            }, (st: LiveStatus) => st.sourceKey)
           }
           .padding({ left: 16, right: 16, top: 4 })
         }
@@ -157,6 +183,9 @@ export struct LivePage {
         .layoutWeight(1)
       } else {
         Grid() {
+          // Grid 自带复用：只创建可视区的 GridItem，滚动时复用。
+          // 之前担心的「1500 个频道全量急切渲染」在 Grid 里其实不会发生，
+          // 真正拖慢重绘的是分组芯片里每次重算 counts()（已加缓存）。
           ForEach(this.visible(), (channel: LiveChannel) => {
             GridItem() {
               Row({ space: 8 }) {

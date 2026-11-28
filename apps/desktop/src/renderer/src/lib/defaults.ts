@@ -63,13 +63,6 @@ export const DEFAULT_DISABLED_KEYS: string[] = (data.sources ?? [])
  */
 export const VOD_SELECTION_VERSION = 10;
 
-/** 默认不启用的内置点播源在设置页需要解释一句，否则用户以为它坏了 */
-export const DEFAULT_VOD_NOTES: Record<string, string> = Object.fromEntries(
-  (data.sources ?? [])
-    .map((source, index) => [`builtin_${index}`, source.note ?? ''] as const)
-    .filter(([, note]) => note !== '')
-);
-
 export const DEFAULT_LIVE_SOURCES: LiveSourceConfig[] = (data.liveSources ?? []).map((source, index) => ({
   key: `builtin_live_${index}`,
   name: source.name,

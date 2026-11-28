@@ -18,15 +18,26 @@ import { LivePlayerPage } from './LivePlayerPage';
 @Entry
 @Component
 struct Index {
-  @StorageLink('vmVersion') vmVersion: number = 0;
+  /**
+   * 每次 `bump()` 都会变，用 @Watch 接住它来驱动 Toast。
+   *
+   * 原实现把 `watchToast()` 挂在根 Stack 的 `onAreaChange` 上：根节点恒定
+   * 100%×100%，尺寸永不变化，这个回调基本不会触发 —— 所有 toast 都不会出现。
+   */
+  @StorageLink('vmVersion') @Watch('onVersionChange') vmVersion: number = 0;
   @State private toast: string = '';
   private toastTimer: number = -1;
+
+  onVersionChange(): void {
+    this.watchToast();
+  }
 
   aboutToAppear(): void {
     // 首次进入触发一次默认源合并（EntryAbility 里已经 start 过，这里只是兜底）
     if (appModel.data.sources.length === 0) {
       appModel.bump();
     }
+    this.watchToast();
   }
 
   aboutToDisappear(): void {
@@ -104,9 +115,6 @@ struct Index {
     .width('100%')
     .height('100%')
     .backgroundColor(Palette.Bg)
-    .onAreaChange(() => {
-      this.watchToast();
-    })
   }
 
   @Builder

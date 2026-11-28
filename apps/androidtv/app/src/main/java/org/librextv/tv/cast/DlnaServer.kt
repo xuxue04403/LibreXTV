@@ -96,8 +96,28 @@ class DlnaServer(
 
         acquireMulticastLock()
 
+        // SSDP socket 必须在这里同步建好：1900 端口被别的 DLNA（或上次残留）占着时，
+        // 建 socket / joinGroup 会抛异常。放在 ssdpLoop 里建、失败只打日志的话，
+        // 下面照样 running = true，界面显示「投屏接收已就绪」并给出局域网地址，
+        // 但手机端永远搜不到这台设备，用户完全无从判断哪里出了问题。
+        val ssdp = runCatching {
+            MulticastSocket(SSDP_PORT).apply {
+                reuseAddress = true
+                joinGroup(InetSocketAddress(InetAddress.getByName(SSDP_ADDRESS), SSDP_PORT), null)
+                soTimeout = 0
+            }
+        }.getOrElse { e ->
+            Log.w(TAG, "SSDP 监听启动失败（1900 端口可能被占用）：${e.message}")
+            runCatching { server.close() }
+            httpServer = null
+            multicastLock?.let { if (it.isHeld) it.release() }
+            multicastLock = null
+            return
+        }
+        ssdpSocket = ssdp
+
         httpThread = thread(name = "dlna-http", isDaemon = true) { acceptLoop(server) }
-        ssdpThread = thread(name = "dlna-ssdp", isDaemon = true) { ssdpLoop(port, ip) }
+        ssdpThread = thread(name = "dlna-ssdp", isDaemon = true) { ssdpLoop(ssdp, port, ip) }
         running = true
         Log.i(TAG, "DLNA 接收端已启动：$address")
     }
@@ -156,8 +176,16 @@ class DlnaServer(
                 return
             } ?: return
 
-            val response = route(request.method, request.path, request.body, request.headers)
-            writeResponse(socket.getOutputStream(), response.first, response.second)
+            val response = runCatching {
+                route(request.method, request.path, request.body, request.headers)
+            }.getOrElse {
+                // 路由内部抛异常（畸形 SOAP、越界下标等）不能让这个 worker 线程带着
+                // 未捕获异常退出：客户端会一个字节都收不到，只能干等到超时。
+                Log.w(TAG, "处理请求失败：${it.message}")
+                "500 Internal Server Error" to "internal error"
+            }
+            runCatching { writeResponse(socket.getOutputStream(), response.first, response.second) }
+                .onFailure { Log.w(TAG, "写响应失败：${it.message}") }
         }
     }
 
@@ -343,14 +371,8 @@ class DlnaServer(
 
     // —— SSDP ——
 
-    private fun ssdpLoop(port: Int, ip: String) {
+    private fun ssdpLoop(socket: MulticastSocket, port: Int, ip: String) {
         try {
-            val socket = MulticastSocket(SSDP_PORT).apply {
-                reuseAddress = true
-                joinGroup(InetSocketAddress(InetAddress.getByName(SSDP_ADDRESS), SSDP_PORT), null)
-                soTimeout = 0
-            }
-            ssdpSocket = socket
             val buffer = ByteArray(2048)
             while (running) {
                 val packet = DatagramPacket(buffer, buffer.size)

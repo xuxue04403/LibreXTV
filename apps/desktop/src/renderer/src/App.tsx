@@ -84,7 +84,9 @@ export function App() {
         startIndexWarmup();
         // 内置片库的每日增量：把当前启用的源报给主进程，由它拉各源第 1 页
         // （那页就是当天新片）并进内存表。放在最后，别和首屏抢带宽。
-        void pullSeedDelta();
+        // 必须 catch：主进程没起来（或 IPC 在退出过程中被销毁）时这条 Promise
+        // 会 reject，没有 catch 就是一个没人处理的 unhandledrejection。
+        void pullSeedDelta().catch(() => undefined);
         // 到期的订阅在后台静默同步；每半小时再看一眼，长时间挂机也能刷新
         void syncDueSubscriptions().catch(() => undefined);
         const syncTimer = window.setInterval(() => {
@@ -106,13 +108,22 @@ export function App() {
   }, [bootAttempt]);
 
   useEffect(() => {
-    const resolved =
-      theme === 'system'
-        ? window.matchMedia('(prefers-color-scheme: light)').matches
-          ? 'light'
-          : 'dark'
-        : theme;
-    document.documentElement.dataset.theme = resolved;
+    // 主题设成「跟随系统」时要一直跟着系统走：早先只在 theme 变化时算一次，
+    // 用户在 Windows 里切了深/浅色，应用界面停在旧配色上，必须重启才生效。
+    const query = window.matchMedia('(prefers-color-scheme: light)');
+    const apply = (): void => {
+      const resolved = theme === 'system' ? (query.matches ? 'light' : 'dark') : theme;
+      document.documentElement.dataset.theme = resolved;
+    };
+    apply();
+    if (theme !== 'system') return;
+    // Safari 14 / 老 Chromium 只有 addListener，没有 addEventListener
+    if (typeof query.addEventListener === 'function') {
+      query.addEventListener('change', apply);
+      return () => query.removeEventListener('change', apply);
+    }
+    query.addListener(apply);
+    return () => query.removeListener(apply);
   }, [theme]);
 
   // 全局快捷键：Ctrl/Cmd + F 聚焦搜索，Ctrl/Cmd + 1..4 切页

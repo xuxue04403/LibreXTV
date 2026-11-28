@@ -61,7 +61,10 @@ class BitReader {
       if (zeros > 32) throw new Error('非法的 exp-golomb 编码');
     }
     if (zeros === 0) return 0;
-    return (1 << zeros) - 1 + this.readBits(zeros);
+    // 必须用 2 ** zeros 而不是 1 << zeros：JS 的位运算全是 32 位有符号，
+    // zeros >= 31 时 1 << 32 === 1、1 << 31 变成负数，算出来的尺寸是错的
+    // （损坏或恶意的 SPS 就会走到这里）。
+    return 2 ** zeros - 1 + this.readBits(zeros);
   }
 
   /** 有符号 exp-golomb（scaling list 与部分语法元素用） */

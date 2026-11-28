@@ -311,6 +311,44 @@ describe('storage 纯函数', () => {
     expect(snap!.sources[0].key).toBe('a');
     expect(snap!.history).toHaveLength(200);
   });
+
+  it('parseSnapshot 逐字段重建源，name 不是字符串时退回主机名', () => {
+    // 旧实现 `{ ...obj, url }` 原样透传：name 为 123 会一路进
+    // SourceConfig.name: string，随后 group.ts 的 localeCompare 抛 TypeError，
+    // 聚合列表白屏，而且已经落盘，重启后依旧。
+    const snap = parseSnapshot(
+      JSON.stringify({
+        sources: [
+          { key: 'a', url: 'https://bad/api', name: 123 },
+          { key: 'b', url: 'https://good/api', name: ' 良好  ', detail: 'https://good/detail/' },
+          { key: 'c', url: 'https://c/api', detail: 'javascript:alert(1)', isAdult: 'yes' },
+        ],
+      })
+    );
+    expect(snap!.sources[0].name).toBe('bad');
+    expect(typeof snap!.sources[0].name).toBe('string');
+    expect(snap!.sources[1].name).toBe('良好');
+    expect(snap!.sources[1].detail).toBe('https://good/detail/');
+    // 非法 detail 与真值判断都要收敛：不能把 'yes' 当成人标记
+    expect(snap!.sources[2].detail).toBeUndefined();
+    expect(snap!.sources[2].isAdult).toBeUndefined();
+    expect(snap!.sources[2].name).toBe('c');
+    expect(() => snap!.sources.map((s) => s.name.localeCompare('x', 'zh-CN'))).not.toThrow();
+  });
+
+  it('parseSnapshot 的选中项与真实源求交', () => {
+    const snap = parseSnapshot(
+      JSON.stringify({
+        sources: [{ key: 'a', name: 'A', url: 'https://a/api' }],
+        liveSources: [{ key: 'L1', name: 'L1', url: 'https://l/1.m3u' }],
+        // b 对应的源已经被删掉了，不能继续占着「已启用」
+        selectedKeys: ['a', 'b', 42],
+        liveSelectedKeys: ['L1', 'L2'],
+      })
+    );
+    expect(snap!.selectedKeys).toEqual(['a']);
+    expect(snap!.liveSelectedKeys).toEqual(['L1']);
+  });
 });
 
 describe('EPG', () => {

@@ -81,7 +81,13 @@ export async function getText(url: string, opts?: RequestOptions): Promise<strin
       const decoder = util.TextDecoder.create('utf-8');
       body = decoder.decodeToString(new Uint8Array(resp.result as ArrayBuffer));
     }
-    return body.length > MAX_BODY_CHARS ? body.slice(0, MAX_BODY_CHARS) : body;
+    // 超过上限直接报错，不要静默截断：
+    // 截断的 JSON 会解析失败并报成「返回内容不是合法 JSON」（把人引向错的方向），
+    // 截断的 m3u 会变成「只解析到一部分频道」却仍然报成功 —— 两种都比失败更难查。
+    if (body.length > MAX_BODY_CHARS) {
+      throw new NetError(`响应超过 ${Math.round(MAX_BODY_CHARS / 1024 / 1024)}MB，已放弃（地址可能不是清单或接口）`, 502);
+    }
+    return body;
   } catch (err) {
     if (err instanceof NetError) {
       throw err;

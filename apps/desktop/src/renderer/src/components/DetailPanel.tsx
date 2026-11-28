@@ -172,6 +172,10 @@ export function DetailPanel({
 
   useEffect(() => {
     let alive = true;
+    // 除了 alive 标志，还要真的把在途请求掐掉：换源/关面板时 alive 只让结果不写回，
+    // 请求本身仍会跑完（最长 10 秒超时）。用户来回换几个源就是几条并发慢请求，
+    // 在弱网下把后点的那个挤在后面，看起来像「换源后选集加载很慢」。
+    const controller = new AbortController();
     // 观看记录每 5 秒就会被播放页写一次，放进依赖会导致详情被反复重拉、
     // 同时还把 detail 置空让选集闪一下——这里现取快照，依赖只留「选了哪个源」。
     const { history: historySnapshot } = useAppStore.getState();
@@ -190,7 +194,7 @@ export function DetailPanel({
     setLoading(true);
     setError(null);
     setDetail(null);
-    fetchDetail(source, selected.vodId, http)
+    fetchDetail(source, selected.vodId, http, { signal: controller.signal })
       .then((d) => {
         if (!alive) return;
         setDetail(d);
@@ -201,6 +205,8 @@ export function DetailPanel({
       })
       .catch((err: unknown) => {
         if (!alive) return;
+        // 主动取消不是失败，不要拿它去覆盖错误区
+        if (err instanceof Error && err.name === 'AbortError') return;
         setError(err instanceof Error ? err.message : '获取详情失败');
       })
       .finally(() => {
@@ -208,6 +214,7 @@ export function DetailPanel({
       });
     return () => {
       alive = false;
+      controller.abort();
     };
   }, [resolveSource, selected]);
 

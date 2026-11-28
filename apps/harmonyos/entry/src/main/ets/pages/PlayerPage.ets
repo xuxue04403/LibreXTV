@@ -84,6 +84,10 @@ export struct PlayerPage {
   }
 
   aboutToDisappear(): void {
+    // 推进序号后再释放：还在 await 里的 openCurrent 回来会发现序号变了，
+    // 就地丢弃自己创建的播放器。否则退出页面后那个迟到的 createAVPlayer
+    // 仍会接管（赋值给 this.player）并开始播放，ticker 也会重新起来 —— 出了页面还有声音。
+    this.openSeq += 1;
     this.stopTicker();
     if (this.noteTimer >= 0) {
       clearTimeout(this.noteTimer);
@@ -333,6 +337,13 @@ export struct PlayerPage {
         this.draining = false;
         this.ended = false;
         this.errorText = '';
+        // 换源后进度/时长是上一个源那一集的，必须清零：
+        // 否则新源起播前 UI 会显示旧的时间轴，resumedOnce 还会让它跳过续播定位。
+        this.positionMs = 0;
+        this.durationMs = 0;
+        this.resumedOnce = false;
+        this.stalledSec = 0;
+        this.lastSaveAt = 0;
         this.showNote(`已切换到「${c.sourceName}」`);
         await this.openCurrent();
         return;
@@ -452,6 +463,10 @@ export struct PlayerPage {
             } })
             PillButton({ text: '重试', onTap: () => {
               this.errorText = '';
+              // 复位 ended：播完之后这里重试，如果 ended 还是 true，
+              // 退出时的「记住进度」会被跳过，卡死检测也不会再启动。
+              this.ended = false;
+              this.stalledSec = 0;
               this.openCurrent();
             } })
             PillButton({ text: '返回', onTap: () => {

@@ -22,6 +22,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import crypto from 'node:crypto';
+import { Agent } from 'undici';
 import { stripAdGroups } from '@librextv/core';
 
 const DEFAULT_UA =
@@ -161,12 +162,20 @@ export interface MediaProxy {
 function isPrivateAddress(ip: string): boolean {
   if (net.isIPv4(ip)) {
     const parts = ip.split('.').map(Number);
-    const [a, b] = parts;
+    const [a, b, c] = parts;
     if (a === 0 || a === 10 || a === 127) return true;
     if (a === 169 && b === 254) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
     if (a === 100 && b >= 64 && b <= 127) return true;
+    // IANA 特殊用途地址：这些既不是公网可路由地址，也是 SSRF 的常见跳板
+    // （云元数据、基准测试网段、文档示例网段、保留段与广播）
+    if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24（含 .9/.10 协议分配）
+    if (a === 192 && b === 0 && c === 2) return true; // 192.0.2.0/24 TEST-NET-1
+    if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 基准测试
+    if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24 TEST-NET-2
+    if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 TEST-NET-3
+    if (a >= 240) return true; // 240.0.0.0/4 保留 + 255.255.255.255 广播
     return false;
   }
   const lower = ip.toLowerCase();
@@ -232,6 +241,80 @@ async function lookupCached(host: string): Promise<{ address: string; family: nu
   return task;
 }
 
+/**
+ * 把已校验过的解析结果钉给 undici 的连接器。
+ *
+ * 为什么需要：`assertAllowedTarget` 用 `dns.lookup` 校验一次，`fetch` 内部由 undici
+ * 再解析一次。两次之间 DNS 可以变脸（rebinding：第一次公网 IP 过校验、第二次内网 IP
+ * 建连接），校验就白做了。这里把已校验的 IP 直接交给 `connect.lookup`，undici 不再自己解析。
+ *
+ * 兜底：连接器只对「本次已解析过的主机名」生效；主机名对不上时回落到系统解析（正常路径
+ * 不会走到，因为同一跳的 host 刚在 `assertAllowedTarget` 里解析过）。
+ */
+const pinnedByHost = new Map<string, { address: string; expires: number }>();
+const PINNED_MAX = 256;
+const PINNED_TTL_MS = 60_000;
+
+/** 记住「某主机名刚刚校验通过的 IP」，连接时钉死在同一地址 */
+function pinResolution(host: string, address: string): void {
+  if (pinnedByHost.size >= PINNED_MAX) pinnedByHost.clear();
+  pinnedByHost.set(host, { address, expires: Date.now() + PINNED_TTL_MS });
+}
+
+function pinnedAddressOf(host: string): string | null {
+  const hit = pinnedByHost.get(host);
+  if (!hit) return null;
+  if (hit.expires <= Date.now()) {
+    pinnedByHost.delete(host);
+    return null;
+  }
+  return hit.address;
+}
+
+const pinnedAgents = new Map<string, Agent>();
+const PINNED_AGENT_MAX = 64;
+
+function agentPinnedTo(host: string, address: string): Agent {
+  const key = `${host}|${address}`;
+  const hit = pinnedAgents.get(key);
+  if (hit) return hit;
+  const agent = new Agent({
+    connect: {
+      lookup: (hostname: string, options: { all?: boolean }, cb: (...args: never[]) => void): void => {
+        const reply = cb as unknown as (
+          err: NodeJS.ErrnoException | null,
+          address?: string | { address: string; family: number }[],
+          family?: number
+        ) => void;
+        const pinned = hostname === host ? address : null;
+        const all = Boolean((options as { all?: boolean }).all);
+        if (pinned) {
+          if (all) reply(null, [{ address: pinned, family: net.isIPv6(pinned) ? 6 : 4 }]);
+          else reply(null, pinned, net.isIPv6(pinned) ? 6 : 4);
+          return;
+        }
+        dns.lookup(hostname, { all: true }).then(
+          (res) => {
+            if (all) reply(null, res);
+            else reply(null, res[0]?.address, res[0]?.family);
+          },
+          (err: unknown) => reply(err as NodeJS.ErrnoException)
+        );
+      },
+    },
+  });
+  if (pinnedAgents.size >= PINNED_AGENT_MAX) {
+    const oldestKey = pinnedAgents.keys().next();
+    if (!oldestKey.done) {
+      const oldest = pinnedAgents.get(oldestKey.value);
+      pinnedAgents.delete(oldestKey.value);
+      void oldest?.close().catch(() => undefined);
+    }
+  }
+  pinnedAgents.set(key, agent);
+  return agent;
+}
+
 /** 目标地址校验：协议白名单 + 内网地址拒绝（DNS 解析后校验，防域名绕过） */
 export async function assertAllowedTarget(raw: string, allowPrivate = false): Promise<URL> {
   let url: URL;
@@ -255,6 +338,10 @@ export async function assertAllowedTarget(raw: string, allowPrivate = false): Pr
   const records = await lookupCached(host).catch(() => []);
   if (records.length === 0) throw new Error('域名解析失败');
   if (records.some((r) => isPrivateAddress(r.address))) throw new Error('拒绝访问内网地址');
+  // 把「刚刚校验通过的那个 IP」记下来，让实际连接钉在同一地址上（防 DNS rebinding：
+  // 校验用公网 IP、连接时换成内网 IP）。优先 IPv4：部分源站 IPv6 质量差。
+  const chosen = records.find((r) => r.family === 4) ?? records[0];
+  if (chosen) pinResolution(host, chosen.address);
   return url;
 }
 
@@ -290,7 +377,18 @@ export async function fetchChecked(
       const { href, authorization } = splitCredentials(current);
       const headers = new Headers(init.headers);
       if (authorization) headers.set('Authorization', authorization);
-      res = await fetch(href, { ...init, headers, redirect: 'manual', method: init.method, signal });
+      // 连接钉在「刚校验通过的那个 IP」上：undici 不再自己解析域名，
+      // 否则校验与连接之间的 DNS 变脸就能把内网地址塞进来（rebinding）。
+      const pinned = pinnedAddressOf(current.hostname);
+      const dispatcher = pinned ? agentPinnedTo(current.hostname, pinned) : undefined;
+      res = await fetch(href, {
+        ...init,
+        headers,
+        redirect: 'manual',
+        method: init.method,
+        signal,
+        ...(dispatcher ? { dispatcher } : {}),
+      } as RequestInit);
     } finally {
       clearTimeout(timer);
     }

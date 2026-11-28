@@ -215,7 +215,14 @@ export function LivePage({ onOpenSettings }: { onOpenSettings: () => void }) {
       if (myRun !== runId.current) return;
       // 被主动中断（重新加载/离开页面）不是失败：不要落盘、不要弹错误
       if (controller.signal.aborted) return;
-      if (flushTimer !== undefined) window.clearTimeout(flushTimer);
+      // 收尾时把合批定时器停掉，并且**必须把句柄置回 undefined**：
+      // scheduleFlush 是靠 `flushTimer !== undefined` 判断「已经排过队了」，
+      // 只 clearTimeout 不清句柄会让之后所有 scheduleFlush 永久短路
+      // （比如用户点重载、新一轮的渐进渲染就再也上不了屏）。
+      if (flushTimer !== undefined) {
+        window.clearTimeout(flushTimer);
+        flushTimer = undefined;
+      }
 
       const states: PlaylistState[] = [];
       results.forEach((result, i) => {

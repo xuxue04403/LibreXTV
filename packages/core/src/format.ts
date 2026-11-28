@@ -83,5 +83,8 @@ export function clampEpisodeIndex(index: number, length: number): number {
  * 用户看到的集号必须等同于他点的那一格、也等同于真正播放的那一格，所以统一用下标。
  */
 export function episodeLabel(index: number): string {
+  // 与 clampEpisodeIndex 同一口径：NaN/Infinity 一律当第 1 集，
+  // 否则面板上会出现「第 NaN 集」
+  if (!Number.isFinite(index)) return '第 1 集';
   return `第 ${Math.max(0, Math.trunc(index)) + 1} 集`;
 }

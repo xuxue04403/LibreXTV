@@ -64,9 +64,14 @@ object SeedTitles {
     @Volatile
     private var all: List<String> = emptyList()
 
-    /** 去重用的片名集合，与 [all] 同步维护 */
-    @Volatile
-    private var nameSet: Set<String> = emptySet()
+    /**
+     * 去重用的片名集合，与 [all] 同步维护。
+     *
+     * 做成「可变 + 只在 [mergeLock] 内改」，而不是每次合并都 `HashSet(nameSet)` 复制一份：
+     * 22 万个字符串的 HashSet 复制一次是十几 MB，增量每天都会跑，低端盒子受不了。
+     * 读它的地方只有 [merge] 自己（查询走的是 [all] 与倒排表），所以原地增删是安全的。
+     */
+    private val nameSet: MutableSet<String> = HashSet()
 
     @Volatile
     var ready: Boolean = false
@@ -184,7 +189,12 @@ object SeedTitles {
 
         byInitials = map
         all = plain
-        nameSet = seen
+        // nameSet 是 val，就地清空再灌：set 体积 22 万，重建对象虽也不贵，
+        // 但就地填充能少一次大对象分配。
+        synchronized(mergeLock) {
+            nameSet.clear()
+            nameSet.addAll(seen)
+        }
         keys = map.size
     }
 
@@ -196,12 +206,13 @@ object SeedTitles {
     fun merge(names: Collection<String>): Int {
         if (!ready) return 0
         synchronized(mergeLock) {
-            val seen = HashSet(nameSet)
+            // 直接在 nameSet 上判重并加入：它已经可变，不必再复制一份 22 万条的副本。
+            // 只算 added，索引稍后统一建。
             val added = ArrayList<String>()
             for (raw in names) {
                 val name = raw.trim()
-                if (name.isEmpty() || !seen.add(name)) continue
-                added.add(name)
+                if (name.isEmpty()) continue
+                if (nameSet.add(name)) added.add(name)
             }
             if (added.isEmpty()) return 0
             // 只动被命中的键：给这一个键换一个新 List，其余 58 万个键保持原引用不动。
@@ -220,7 +231,6 @@ object SeedTitles {
             }
             byInitials = map
             all = all + added
-            nameSet = seen
             keys = map.size
             return added.size
         }
@@ -230,6 +240,9 @@ object SeedTitles {
      * 把在线更新下来的整份片名表写进用户目录，供下次启动读取。
      *
      * 先写临时文件再改名：中途断电不会留下半截文件把搜索废掉。
+     * 直接 rename 覆盖，而不是「先删旧文件再改名」—— 删掉之后到改名之间有个空窗，
+     * 那一刻断电就既没有旧表也没有新表，搜索直接废掉。POSIX 的 rename 是原子的，
+     * 会直接替换目标；只有在它失败时（个别文件系统跨挂载点不允许覆盖）才退回删了再改。
      */
     fun cacheForNextLaunch(context: Context, names: List<String>): Boolean {
         if (names.isEmpty()) return false
@@ -242,6 +255,7 @@ object SeedTitles {
                     w.write("\n")
                 }
             }
+            if (tmp.renameTo(target)) return@runCatching true
             if (target.exists() && !target.delete()) throw IllegalStateException("删不掉旧种子表")
             if (!tmp.renameTo(target)) throw IllegalStateException("改名失败")
             true
@@ -303,7 +317,10 @@ object SeedTitles {
         }
         byInitials = map
         all = plain
-        nameSet = plain.toHashSet()
+        synchronized(mergeLock) {
+            nameSet.clear()
+            nameSet.addAll(plain)
+        }
         ready = true
         origin = "内置"
     }
@@ -312,7 +329,7 @@ object SeedTitles {
     fun clearForTest() {
         byInitials = ConcurrentHashMap()
         all = emptyList()
-        nameSet = emptySet()
+        synchronized(mergeLock) { nameSet.clear() }
         ready = false
         loadMs = 0
         keys = 0

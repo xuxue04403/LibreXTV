@@ -188,34 +188,41 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
             failingOver = true
             note = "$reason，正在切换片源…"
             scope.launch {
-                val result = vm.failoverPlayback(current, tried.toSet(), currentIndex, discovered)
-                if (result == null) {
-                    if (manual) {
-                        // 手动换源时画面还在正常播，不能弹整屏错误把正在看的片子判死
-                        note = "没有更多可用片源了"
+                // finally 必须写：换源请求在飞行中用户按返回/切后台，协程被取消
+                // （failoverPlayback 内部有 8s/12s 的 withTimeoutOrNull，取消点很多），
+                // failingOver 不归位的话，此后所有手动换源和错误自动换源都会被
+                // 「if (!failingOver)」静默跳过。
+                try {
+                    val result = vm.failoverPlayback(current, tried.toSet(), currentIndex, discovered)
+                    if (result == null) {
+                        if (manual) {
+                            // 手动换源时画面还在正常播，不能弹整屏错误把正在看的片子判死
+                            note = "没有更多可用片源了"
+                            error = null
+                            delay(2_400)
+                            note = null
+                        } else {
+                            note = null
+                            error = "$reason（已尝试全部片源）"
+                            buffering = false
+                        }
+                    } else {
+                        tried += result.candidate.key
+                        discovered = discovered || result.target.candidates.any { it.key !in target.candidates.map { c -> c.key } }
                         error = null
+                        note = "已切换到「${result.candidate.sourceName}」"
+                        // 换的是「同一集的另一条线」，用户看的位置必须续上
+                        resumeAt = index to exo.currentPosition.coerceAtLeast(0)
+                        // 这里不能再调 play()：下面的 LaunchedEffect 会因 current/index 变化重跑，
+                        // 两处都调会连续 setMediaSource+prepare 两次，表现为换源后多等一个超时周期
+                        current = result.target
+                        index = result.episodeIndex
                         delay(2_400)
                         note = null
-                    } else {
-                        note = null
-                        error = "$reason（已尝试全部片源）"
-                        buffering = false
                     }
-                } else {
-                    tried += result.candidate.key
-                    discovered = discovered || result.target.candidates.any { it.key !in target.candidates.map { c -> c.key } }
-                    error = null
-                    note = "已切换到「${result.candidate.sourceName}」"
-                    // 换的是「同一集的另一条线」，用户看的位置必须续上
-                    resumeAt = index to exo.currentPosition.coerceAtLeast(0)
-                    // 这里不能再调 play()：下面的 LaunchedEffect 会因 current/index 变化重跑，
-                    // 两处都调会连续 setMediaSource+prepare 两次，表现为换源后多等一个超时周期
-                    current = result.target
-                    index = result.episodeIndex
-                    delay(2_400)
-                    note = null
+                } finally {
+                    failingOver = false
                 }
-                failingOver = false
             }
         }
     }
@@ -225,7 +232,10 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         resumeOnStart = exo.playWhenReady
         exo.pause()
-        vm.saveProgress(current, currentIndex, exo.currentPosition.coerceAtLeast(0), exo.duration.coerceAtLeast(0))
+        // 与 onDispose 一致：已播完的集不能再写，否则 finished=true 会被覆盖成 false
+        if (!ended) {
+            vm.saveProgress(current, currentIndex, exo.currentPosition.coerceAtLeast(0), exo.duration.coerceAtLeast(0))
+        }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         if (resumeOnStart) {

@@ -584,8 +584,18 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
 
   // 已完成的源，按完成顺序累积；每完成一个就回调一次 onPartial
   const done: SourceCollected[] = [...duplicated];
+  /**
+   * 预算到期后的封口标志。
+   *
+   * 超时返回时只 `inner.abort()` + `await Promise.resolve()` 是不够的：in-flight
+   * 请求的 catch 会在**返回之后**才跑到 `record()`，再触发一次 `emitPartial`。
+   * 那次迟到的 partial 只含先完成的少数源，会把页面已经渲染好的完整列表替换成
+   * 一个子集（`Category.tsx` 的 runId 守卫在同一 run 内是放行的），用户看到列表
+   * 先出现、再缩水、再闪回。封口后 `record`/`emitPartial` 直接不做事。
+   */
+  let closed = false;
   const emitPartial = () => {
-    if (!opts.onPartial || opts.signal?.aborted) return;
+    if (closed || !opts.onPartial || opts.signal?.aborted) return;
     // 与最终结果同样口径：合并、去重、成人过滤
     const partialItems: SearchResultItem[] = [];
     const seenIds = new Set<string>();
@@ -604,7 +614,10 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
     }
   };
 
-  const budgetMs = Math.max(1_000, opts.budgetMs ?? DEFAULT_BROWSE_BUDGET_MS);
+  // budgetMs 与同函数的 pages/startPage/typeLimit 一样必须做有限性检查：
+  // 传 NaN 时 Math.max 的返回值仍是 NaN，setTimeout(..., NaN) 立刻触发，
+  // 每次分类浏览都瞬间返回「全部源超时」。
+  const budgetMs = Number.isFinite(opts.budgetMs) ? Math.max(1_000, opts.budgetMs as number) : DEFAULT_BROWSE_BUDGET_MS;
   const startedAt = Date.now();
 
   // 内层控制器：到预算点就把还挂着的请求取消掉。不取消的话它们会继续占着
@@ -623,6 +636,8 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
    */
   const results = new Map<SourceConfig, SourceCollected>();
   const record = (source: SourceConfig, entry: SourceCollected): SourceCollected => {
+    // 照常记账（超时后仍想拿到真实失败原因/迟到成功的结果），只是不再回调：
+    // 迟到的那次 `emitPartial` 会把页面已渲染的完整列表替换成子集。
     results.set(source, entry);
     done.push(entry);
     emitPartial();
@@ -705,6 +720,9 @@ export async function browseCategory(opts: CategoryBrowseOptions): Promise<Categ
   if (timer) clearTimeout(timer);
   const expired = settled === 'timeout';
   if (expired) {
+    // 先封口再 abort：封口后迟到的 `record`/`emitPartial` 一律不做事，
+    // 页面不会在渲染完完整列表之后又被一个子集覆盖。
+    closed = true;
     inner.abort();
     // 让已经 reject 的几个 catch 先跑完，结果更贴近真实（失败原因比「未完成」有用）
     await Promise.resolve();

@@ -510,9 +510,18 @@ export function WatchPage({ target, onClose }: { target: WatchTarget; onClose: (
       setSkipHint({ label, from });
       skipHintTimer.current = setTimeout(() => setSkipHint(null), 8000);
     };
+    // `timeupdate` 一秒能来 4~10 次，每次都 setState 会让整页（进度条、缓冲条、
+    // 时间文案、跳过提示）跟着重渲染。播放器自己在解码，再叠一层无谓的重渲染
+    // 就是低配机器上「看久了越来越卡」的来源。这里 ~150ms 才刷新一次画面，
+    // 判死/落盘/跳过仍然按每次回调实时算（它们只看 video.currentTime，很便宜）。
+    let lastPaint = 0;
     const onTime = () => {
-      setCurrent(video.currentTime);
-      if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1));
+      const now = performance.now();
+      if (now - lastPaint >= 150) {
+        lastPaint = now;
+        setCurrent(video.currentTime);
+        if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1));
+      }
       // 15 秒一次：太久会丢进度，太密会让 zustand persist 反复全量序列化写盘。
       // 暂停/切集/结束/退出都有独立落盘点，这里只是「播放中」的兜底。
       if (Math.abs(video.currentTime - savedRef.current) >= 15) persistProgress(video.currentTime, index, video.duration);

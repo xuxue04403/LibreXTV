@@ -226,39 +226,44 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
             failingOver = true
             note = "$reason，正在切换片源…"
             scope.launch {
-                val result = vm.failoverPlayback(current, tried.toSet(), currentIndex, discovered)
-                if (result == null) {
-                    if (manual) {
-                        // 手动按菜单键只是「想换条线看看」，画面还在正常播：
-                        // 不能弹整屏「播放失败」，否则等于把正在看的片子判死，
-                        // 而且错误面板会吞掉除返回/重试以外所有按键。
-                        note = "没有更多可用片源了"
+                // finally 必须写：换源在飞行中用户按返回/切集，协程被取消时
+                // failingOver 若不归位，此后所有换源都会被「if (!failingOver)」静默跳过
+                try {
+                    val result = vm.failoverPlayback(current, tried.toSet(), currentIndex, discovered)
+                    if (result == null) {
+                        if (manual) {
+                            // 手动按菜单键只是「想换条线看看」，画面还在正常播：
+                            // 不能弹整屏「播放失败」，否则等于把正在看的片子判死，
+                            // 而且错误面板会吞掉除返回/重试以外所有按键。
+                            note = "没有更多可用片源了"
+                            error = null
+                            delay(2_400)
+                            note = null
+                        } else {
+                            note = null
+                            error = "$reason（已尝试全部片源）"
+                            buffering = false
+                        }
+                    } else {
+                        tried += result.candidate.key
+                        discovered = discovered || result.target.candidates.any { it.key !in target.candidates.map { c -> c.key } }
                         error = null
+                        note = "已切换到「${result.candidate.sourceName}」"
+                        // 换的是「同一集的另一条线」，用户看的位置必须续上
+                        resumeAt = index to exo.currentPosition.coerceAtLeast(0)
+                        // 注意：这里**不能**再调 play()。
+                        // 下面那个 LaunchedEffect(current.source.key, current.vodId, index)
+                        // 会因 current/index 变化而重跑，里面已经 play + playWhenReady。
+                        // 两处都调会连续 setMediaSource + prepare 两次：第一次刚拉起的
+                        // 清单解析被第二次顶掉，表现为换源后多等一个超时周期、甚至误报错误。
+                        current = result.target
+                        index = result.episodeIndex
                         delay(2_400)
                         note = null
-                    } else {
-                        note = null
-                        error = "$reason（已尝试全部片源）"
-                        buffering = false
                     }
-                } else {
-                    tried += result.candidate.key
-                    discovered = discovered || result.target.candidates.any { it.key !in target.candidates.map { c -> c.key } }
-                    error = null
-                    note = "已切换到「${result.candidate.sourceName}」"
-                    // 换的是「同一集的另一条线」，用户看的位置必须续上
-                    resumeAt = index to exo.currentPosition.coerceAtLeast(0)
-                    // 注意：这里**不能**再调 play()。
-                    // 下面那个 LaunchedEffect(current.source.key, current.vodId, index)
-                    // 会因 current/index 变化而重跑，里面已经 play + playWhenReady。
-                    // 两处都调会连续 setMediaSource + prepare 两次：第一次刚拉起的
-                    // 清单解析被第二次顶掉，表现为换源后多等一个超时周期、甚至误报错误。
-                    current = result.target
-                    index = result.episodeIndex
-                    delay(2_400)
-                    note = null
+                } finally {
+                    failingOver = false
                 }
-                failingOver = false
             }
         }
     }
@@ -535,11 +540,24 @@ fun PlayerScreen(vm: AppViewModel, target: Screen.Player, onExit: () -> Unit) {
                         true
                     }
                     Key.MediaNext -> {
-                        if (index + 1 < current.episodes.size) index += 1
+                        if (index + 1 < current.episodes.size) {
+                            index += 1
+                            // 与抽屉里的「下一集」保持一致：换集必须清掉上一集的 tried
+                            // 集合，否则新集首次出错时 failoverPlayback 会以为「片源都试过了」，
+                            // 直接放弃自动换源。
+                            tried.clear()
+                            tried += "${current.source.key}:${current.vodId}"
+                            discovered = false
+                        }
                         true
                     }
                     Key.MediaPrevious -> {
-                        if (index > 0) index -= 1
+                        if (index > 0) {
+                            index -= 1
+                            tried.clear()
+                            tried += "${current.source.key}:${current.vodId}"
+                            discovered = false
+                        }
                         true
                     }
                     // 菜单键：手动换源（自动换源失败后的兜底，也给想主动换线的用户）

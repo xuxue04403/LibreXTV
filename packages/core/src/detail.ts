@@ -13,7 +13,10 @@ import type { SourceConfig, VideoDetail } from './types';
 export interface DetailOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
-  /** 详情页根地址（优先于 source.detail） */
+  /**
+   * 详情页根地址兜底。**优先级低于 `source.detail`**：源级配置永远更具体，
+   * 全局参数不该悄悄覆盖它。两者都没有时用接口地址的 origin。
+   */
   baseUrl?: string;
 }
 

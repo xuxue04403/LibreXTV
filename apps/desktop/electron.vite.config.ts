@@ -6,7 +6,11 @@ const coreAlias = resolve(__dirname, '../../packages/core/src/index.ts');
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    // `undici` 必须被打进 bundle，不能外部化：`electron-builder.yml` 里
+    // `'!node_modules/**'` 把整个 node_modules 排除在 asar 之外，运行时
+    // `require('undici')` 会直接 "Cannot find module 'undici'" 崩在主进程。
+    // 它是纯 JS，rollup 打进去没有额外代价。
+    plugins: [externalizeDepsPlugin({ exclude: ['undici'] })],
     resolve: {
       // 顺序要紧：vite 的 alias 是**前缀**替换，`@librextv/core` 排前面的话，
       // `@librextv/core/seed-titles` 会先被它吃成 `.../index.ts/seed-titles` 再去加载，

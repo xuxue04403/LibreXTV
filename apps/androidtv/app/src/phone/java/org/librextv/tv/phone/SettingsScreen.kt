@@ -105,7 +105,13 @@ fun SettingsScreen(vm: AppViewModel, data: AppData) {
             val enabled = source.key in data.selected
             SourceRow(
                 name = source.name,
-                subtitle = source.url + if (source.builtin) "  ·  内置" else "",
+                subtitle = buildString {
+                    append(source.url)
+                    if (source.builtin) append("  ·  内置")
+                    // 停用原因只在「没启用」时显示：启用着的源写一长串「为什么默认关闭」
+                    // 纯属噪音，用户还要为它多滑一段（TV 版也是这个口径）。
+                    if (!enabled) source.note?.let { append("\n"); append(it) }
+                },
                 enabled = enabled,
                 onToggle = { vm.toggleSource(source.key) },
                 onDelete = {

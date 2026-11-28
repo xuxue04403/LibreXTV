@@ -102,9 +102,12 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
     val firstKeyFocus = remember { FocusRequester() }
     val submitFocus = remember { FocusRequester() }
 
-    // 边敲边出建议：只查本地已见过的条目（零网络）。key 只用 draft —— 本地索引会
-    // 被后台预热持续补充，但那段更新下次敲键时体现即可，不必让每次进度变化都重算。
-    val localSuggestions = remember(draft) {
+    // 边敲边出建议：只查本地已见过的条目（零网络）。key 除了 draft 还要带
+    // vm.seedSize —— 种子表是启动后在后台线程加载的（实测约 1 秒，低端盒子更久），
+    // 只认 draft 的话，用户开机后第一件事就敲字，那时种子表还没就绪、算出的是空表，
+    // 这个空表会被永久记住：之后不管敲什么都不再重算，建议栏一直是空的，
+    // 直到用户碰巧把某个字母删光再打一遍才恢复。
+    val localSuggestions = remember(draft, vm.seedSize) {
         if (draft.isEmpty()) emptyList() else vm.suggestTitles(draft, limit = 40)
     }
     // 拼音串够长时再去问「服务端拼音检索」的那两个源，避免每个字母都打一次网络

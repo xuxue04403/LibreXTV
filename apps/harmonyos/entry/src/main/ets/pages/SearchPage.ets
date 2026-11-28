@@ -37,7 +37,10 @@ export struct SearchPage {
     const seen = new Set<string>();
     const cur = appModel.search.keyword.trim();
     if (cur.length > 0) {
+      // 当前关键词要先进 seen：否则历史里如果有同一部片，
+      // 会再 push 一次，渲染列表就出现两个一样的 key。
       out.push(cur);
+      seen.add(cur);
     }
     for (let i = 0; i < appModel.data.history.length && out.length < 9; i++) {
       const t = appModel.data.history[i].title;
@@ -149,7 +152,7 @@ export struct SearchPage {
         if (appModel.search.statuses.length > 0) {
           Scroll() {
             Row({ space: 6 }) {
-              ForEach(appModel.search.statuses, (st: SearchStatusView) => {
+              ForEach(statusViews(), (st: SearchStatusView) => {
                 Text(st.text)
                   .fontSize(10)
                   .fontColor(st.ok ? Palette.TextMuted : Palette.ErrRed)
@@ -247,6 +250,26 @@ interface SearchStatusView {
   key: string;
   text: string;
   ok: boolean;
+}
+
+/**
+ * 把各源结算结果转成状态条视图模型。
+ *
+ * 不能直接拿 `SearchStatus` 当 `SearchStatusView` 用：后者是本地定义的
+ * 视图模型（`key`/`text`/`ok`），而 `SearchStatus` 只有 `sourceKey`/`sourceName`/
+ * `count`/`error`/`ms` —— 直接传会让 `st.text`、`st.key` 全是 undefined，
+ * 状态条渲染成空白且 ForEach 拿不到唯一 key。
+ */
+function statusViews(): SearchStatusView[] {
+  const out: SearchStatusView[] = [];
+  const list = appModel.search.statuses;
+  for (let i = 0; i < list.length; i++) {
+    const st = list[i];
+    const text = st.ok ? `${st.sourceName} · ${st.count} 条 · ${st.ms}ms`
+      : `${st.sourceName} · ${st.error !== undefined && st.error.length > 0 ? st.error : '失败'}`;
+    out.push({ key: `${st.sourceKey}_${i}`, text: text, ok: st.ok });
+  }
+  return out;
 }
 
 function statusText(): string {

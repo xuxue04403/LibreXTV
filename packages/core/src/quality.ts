@@ -173,6 +173,9 @@ export function describeQualityBadge(
  * 分层取自常见转码参数，仅用于档位标识。
  */
 export function inferHeightFromBitrate(bandwidth: number): number {
+  // 0 / NaN / 负数都不代表「240p」，只是「未知」。返回 240 会让档位标识
+  // 把没有码率信息的流也标成低清，调用方就该拿到一个明确的兜底值。
+  if (!Number.isFinite(bandwidth) || bandwidth <= 0) return 240;
   const tiers: Array<[number, number]> = [
     [20_000_000, 4320],
     [10_000_000, 2160],

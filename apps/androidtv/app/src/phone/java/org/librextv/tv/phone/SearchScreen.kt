@@ -24,6 +24,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,9 +61,16 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
     // 用 TextFieldValue 才能控制光标：从历史/建议词点进来时把光标移到末尾，方便接着改写
     var input by remember { mutableStateOf(TextFieldValue(search.keyword)) }
 
-    // 外部（历史记录、直播收藏等）带着关键词跳进来时同步输入框
-    if (search.keyword.isNotBlank() && input.text != search.keyword) {
-        input = TextFieldValue(search.keyword, selection = TextRange(search.keyword.length))
+    // 外部（历史记录、直播收藏等）带着关键词跳进来时同步输入框。
+    //
+    // 必须放在 LaunchedEffect 里，不能直接写在组合体里：组合体每次重绘都会执行，
+    // 一旦判定 input.text != search.keyword 就把用户刚敲的字整段回滚 —— 表现是
+    // 「往搜索框里打字，字刚出来就被吞掉」，只有和上次搜索词逐字相同时才留得住。
+    // 用 search.keyword 当 key，只在「搜索词本身变了」时同步一次。
+    LaunchedEffect(search.keyword) {
+        if (search.keyword.isNotBlank() && input.text != search.keyword) {
+            input = TextFieldValue(search.keyword, selection = TextRange(search.keyword.length))
+        }
     }
 
     val suggestions = remember(search.keyword, data.history) {

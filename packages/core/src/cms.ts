@@ -154,8 +154,14 @@ export function parseDetailPageHtml(
   // 去重并清理尾缀
   const episodes = [...new Set(matches)].map((link) => {
     let u = link.substring(1);
+    // 采集站常把集数备注跟在地址后面：`xxx.m3u8(第01集)`。
+    // 但不能见到 `(` 就切——签名参数里合法出现括号（`?token=a(b)c`），
+    // 切掉就等于丢签名，播放 403。只有「括号在问号之前」才当备注处理。
     const parenIndex = u.indexOf('(');
-    if (parenIndex > 0) u = u.substring(0, parenIndex);
+    const queryIndex = u.indexOf('?');
+    if (parenIndex > 0 && (queryIndex < 0 || parenIndex < queryIndex)) {
+      u = u.substring(0, parenIndex);
+    }
     return u;
   });
 
@@ -236,15 +242,21 @@ const ADULT_TYPE_EXCEPTIONS = /福利院|福利社|少年福利|儿童福利|社
 /**
  * 判断是否为成人内容。
  *
- * 三个来源（命中任一即屏蔽）：
+ * 四个来源（命中任一即屏蔽）：
  * 1. 来源被标记为成人源（订阅里的 `isAdult`）——此前字段存在但从未被使用；
  * 2. 分类名命中 ADULT_KEYWORDS（先排除误伤词）；
- * 3. 标题命中 ADULT_TITLE_KEYWORDS（兜住「正常分类 + 露骨片名」的漏网）。
+ * 3. 标题命中 ADULT_TITLE_KEYWORDS（兜住「正常分类 + 露骨片名」的漏网）；
+ * 4. 备注/简介命中 ADULT_TITLE_KEYWORDS。
+ *
+ * 第 4 条是实测补的绕过通道：采集站常把「伦理」「无码」写在 `vod_remarks`
+ * （片名和分类都是干净的「电影」「短剧」），只看前三条时开过滤也照样露出来。
+ * `vod_remarks` 早就被映射进 `SearchResultItem.remarks`，只是过滤时没用。
  */
 export function isAdultContent(
   typeName: string | undefined,
   name?: string,
-  sourceIsAdult?: boolean
+  sourceIsAdult?: boolean,
+  remarks?: string
 ): boolean {
   if (sourceIsAdult) return true;
   if (typeName) {
@@ -257,15 +269,18 @@ export function isAdultContent(
     const lower = name.toLowerCase();
     if (ADULT_TITLE_KEYWORDS.some((k) => lower.includes(k.toLowerCase()))) return true;
   }
+  if (remarks) {
+    const lower = remarks.toLowerCase();
+    if (ADULT_TITLE_KEYWORDS.some((k) => lower.includes(k.toLowerCase()))) return true;
+  }
   return false;
 }
 
-export function filterAdultResults<T extends { typeName?: string; name?: string; isAdult?: boolean }>(
-  items: T[],
-  enabled: boolean
-): T[] {
+export function filterAdultResults<
+  T extends { typeName?: string; name?: string; isAdult?: boolean; remarks?: string },
+>(items: T[], enabled: boolean): T[] {
   if (!enabled) return items;
-  return items.filter((item) => !isAdultContent(item.typeName, item.name, item.isAdult));
+  return items.filter((item) => !isAdultContent(item.typeName, item.name, item.isAdult, item.remarks));
 }
 
 /**

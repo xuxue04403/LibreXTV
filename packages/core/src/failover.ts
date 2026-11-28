@@ -13,6 +13,7 @@
  */
 
 import { fetchDetail } from './detail';
+import { clampEpisodeIndex } from './format';
 import type { HttpClient } from './http';
 import { isSameShow, normalizeTitle } from './cms';
 import { searchSources } from './search';
@@ -127,9 +128,10 @@ export function buildPlaybackCandidates(
  * 尽量停在同一集；越界就夹到最后一集 —— 比直接回到第一集友好得多。
  */
 export function pickEpisodeIndex(preferred: number, length: number): number {
-  if (length <= 0) return 0;
-  if (!Number.isFinite(preferred)) return 0;
-  return Math.max(0, Math.min(Math.trunc(preferred), length - 1));
+  // 与 format.ts 的 clampEpisodeIndex 是同一件事，直接复用那一个：
+  // 两份实现迟早会漂移（这里原来漏了 `Number.isFinite(length)`，
+  // length 为 NaN 时返回 NaN，下游 `episodes[NaN]` 就是 undefined）。
+  return clampEpisodeIndex(preferred, length);
 }
 
 /** 按顺序找出第一个还没试过的候选；全部试过返回 undefined */

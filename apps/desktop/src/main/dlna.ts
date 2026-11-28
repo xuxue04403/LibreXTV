@@ -115,12 +115,46 @@ async function readLimitedText(res: Response, limit: number): Promise<string> {
 
 async function describe(location: string): Promise<DlnaDevice | null> {
   try {
+    // SSDP 回包里的 location 来自局域网里任意一台主机（谁都能应答 M-SEARCH）。
+    // 这里额外做一次地址白名单：只接受与本机同网段的私网地址，杜绝
+    // `http://169.254.169.254/...` 这类云元数据 / 公网地址被顺手套取。
+    if (!isAllowedCastAddress(location)) return null;
     const res = await fetch(location, { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return null;
     return parseDeviceDescription(await readLimitedText(res, MAX_DESCRIPTION_BYTES), location);
   } catch {
     return null;
   }
+}
+
+/**
+ * 投屏目标地址白名单：必须是私网 IPv4，且与本机某块网卡同 /16。
+ *
+ * 渲染层能通过 `dlna:cast` 传任意 `location`，SSDP 回包也不可信——不加这道
+ * 闸门，主进程就会替调用方去 fetch 任意地址（SSRF）。回环单独放行，因为
+ * 联调时假渲染器就挂在 127.0.0.1。
+ */
+export function isAllowedCastAddress(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (!net.isIPv4(host)) {
+    // 只接受点分 IPv4：主机名可能被 DNS 解析到内网/元数据地址，绕开这里
+    return false;
+  }
+  const parts = host.split('.').map(Number);
+  const [a, b] = parts;
+  if (a === 127) return true;
+  // 169.254/16 是链路本地（含云元数据），投屏用不到，一律拒绝
+  if (a === 169 && b === 254) return false;
+  const priv = a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  if (!priv) return false;
+  return isSameSubnet(host, localSubnets());
 }
 
 /** 本机所有非回环 IPv4 的 /16 前缀（投屏只可能来自同一网段） */
@@ -145,7 +179,9 @@ function localSubnets(): Set<string> {
  * `0.0.0.0`，那个值永远不可能是对方所在网段，会让所有回包被丢掉（投屏直接找不到设备）。
  */
 function isSameSubnet(address: string, prefixes: Set<string>): boolean {
-  if (prefixes.size === 0) return true;
+  // 拿不到任何网卡信息时**必须返回 false**：返回 true 等于「任意主机都算同网段」，
+  // 会让 SSDP 发现退化成无过滤地 fetch 任意地址（VPN/虚拟网卡环境很容易踩到）。
+  if (prefixes.size === 0) return false;
   if (!net.isIPv4(address)) return false;
   return prefixes.has(address.split('.').slice(0, 2).join('.'));
 }
@@ -251,6 +287,9 @@ function buildMetadata(url: string, title: string): string {
 }
 
 async function soap(controlUrl: string, action: string, args: Record<string, string | number>): Promise<string> {
+  // controlUrl 理论上已经过 assertCastableDevice 与 describe 的白名单校验，
+  // 但 soap 是导出函数，也可能被后续新增的调用路径直接用上，这里再兜一道。
+  if (!isAllowedCastAddress(controlUrl)) throw new Error('控制地址不在允许的局域网范围内');
   const argsXml = Object.entries(args)
     .map(([key, value]) => `<${key}>${typeof value === 'number' ? value : escapeXml(String(value))}</${key}>`)
     .join('');

@@ -35,13 +35,21 @@ export function CastDialog({
 
   const cast = async (device: DlnaDeviceInfo) => {
     setBusy(device.controlUrl);
-    const result = await castToDlna(device, url, title);
-    setBusy(null);
-    if (result.ok) {
-      onCast(device.name);
-      onClose();
-    } else {
-      setError(result.error ?? '投屏失败');
+    // 必须兜住异常：castToDlna 走的是 IPC，主进程侧抛错（设备拒绝连接、控制地址
+    // 不在局域网内…）会让 invoke 直接 reject。没有 try/catch 的话 setBusy(null)
+    // 永远执行不到，按钮就一直卡在「推送中…」，用户只能关掉对话框重来。
+    try {
+      const result = await castToDlna(device, url, title);
+      if (result.ok) {
+        onCast(device.name);
+        onClose();
+      } else {
+        setError(result.error ?? '投屏失败');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '投屏失败');
+    } finally {
+      setBusy(null);
     }
   };
 

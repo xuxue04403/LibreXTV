@@ -65,11 +65,12 @@ export function stripLeadAdGroup(m3u8Content: string): string {
   if (count === 0 || count > LEAD_AD_MAX_SEGMENTS) return m3u8Content;
   if (seconds <= 0 || seconds > LEAD_AD_MAX_SECONDS) return m3u8Content;
 
-  const kept = lines.filter((l, i) => {
-    if (i < firstDisc || i >= nextDisc) return true;
-    const t = l.trim();
-    return t.startsWith('#EXT-X-KEY') || t.startsWith('#EXT-X-MAP');
-  });
+  // 丢弃区间内的 KEY/MAP：它们属于广告段。保留下来会被搬到正片最前面，
+  // hls.js 随后拿广告的 AES key 去解正片前几段 → 花屏/解码失败。
+  // 注意与 stripMarkedAdGroups / stripInterstitialAdGroups 的差别：那两处是
+  // 「原位跳过」（顺序不变，删掉的 KEY 只影响它自己的分片），这里是把区间
+  // 整体摘掉，任何落在区间内的标签都会前移，所以必须一并丢弃。
+  const kept = lines.filter((l, i) => i < firstDisc || i >= nextDisc);
   const out: string[] = [];
   let seenSegment = false;
   for (const l of kept) {

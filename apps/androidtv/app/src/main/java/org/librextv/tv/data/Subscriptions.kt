@@ -13,7 +13,11 @@ object Subscriptions {
     private const val MAX_VOD = 100
     private const val MAX_LIVE = 50
     private val SPIDER = Regex("""^csp_|\.(?:jar|js|py)(?:[?#].*)?$""", RegexOption.IGNORE_CASE)
-    private val LOCAL_ASSET = Regex("""^\.{0,2}/""")
+    // 只有 ./、../ 才是「随订阅文件一起下发的本地文件」。原来的 ^\.{0,2}/ 还会
+    // 匹配 "/api.php/provide/vod" 这种同域绝对路径 —— 那些条目本来会在下面
+    // 因为不是 http 开头被跳过，但先被这里认成「本地资源」，让跳过原因
+    // 完全指错方向（用户看到「跳过 N 条」却找不到原因）。
+    private val LOCAL_ASSET = Regex("""^\.{1,2}/""")
     private val CMS_API = Regex("""/api\.php/provide/vod(?![^?#]*/at/xml)(?:[/?#]|$)""", RegexOption.IGNORE_CASE)
     private val M3U = Regex("""\.m3u8?(?:[?#].*)?$""", RegexOption.IGNORE_CASE)
 

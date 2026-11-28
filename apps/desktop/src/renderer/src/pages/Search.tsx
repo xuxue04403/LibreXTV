@@ -315,7 +315,7 @@ export function SearchPage({
 
   /** 只重试一个失败源：不重跑整轮搜索，已有的结果不闪 */
   const retrySource = useCallback(
-    async (sourceKey: string) => {
+    async (sourceKey: string, signal?: AbortSignal) => {
       // 必须按**当前结果页的词**重试：点字母索引里的片名建议后 draft 已被改回首字母，
       // 用 keyword 重试等于按上一个词重搜，该源条目会被覆盖成另一部剧的结果。
       const word = (lastWord || keyword).trim();
@@ -330,6 +330,7 @@ export function SearchPage({
           filterAdult: settings.adultFilter,
           maxPages: 3,
           timeoutMs: 10_000,
+          ...(signal ? { signal } : {}),
         });
         for (const outcome of result.outcomes) commitOutcome(outcome, myRun, word);
       } catch (err) {
@@ -648,7 +649,15 @@ export function SearchPage({
                 key={o.sourceKey}
                 className={`chip ${o.timedOut ? 'warn' : 'err'}`}
                 title="点击只重试这个源"
-                onClick={() => void retrySource(o.sourceKey)}
+                onClick={() => {
+                  // 点重试前先把还在跑的整轮搜索掐掉：不掐的话它的结果会晚一步回来，
+                  // 和这次单源重试抢同一批 state，表现为「刚重试出来的条目又变回超时」。
+                  // 用 abort 而不是推进 runId：runId 一变，旧轮次 finally 里的
+                  // `if (myRun === runId.current) setLoading(false)` 就不成立，
+                  // 而新的一轮（单源重试）根本不负责收尾 loading，转圈会永远留着。
+                  abortRef.current?.abort();
+                  void retrySource(o.sourceKey);
+                }}
               >
                 {o.sourceName} · {o.timedOut ? '超时' : o.error ?? '失败'} · 重试
               </button>

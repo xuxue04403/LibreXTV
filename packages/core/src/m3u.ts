@@ -43,7 +43,16 @@ function nameFromUrl(url: string): string {
     const u = new URL(url);
     const last = u.pathname.split('/').filter(Boolean).pop();
     if (last) {
-      const decoded = decodeURIComponent(last).replace(/\.(m3u8?|flv|ts|mp4)$/i, '');
+      // decodeURIComponent 遇到畸形百分号编码（`/100%.m3u8`、`/a%ZZ`）会抛
+      // URIError，被外层 catch 兜成「未命名频道」。这里单独兜住，退回原始末段，
+      // 至少还能看出是哪个频道。
+      let decoded = last;
+      try {
+        decoded = decodeURIComponent(last);
+      } catch {
+        /* 保持原始末段 */
+      }
+      decoded = decoded.replace(/\.(m3u8?|flv|ts|mp4)$/i, '');
       if (decoded) return decoded;
     }
     return u.hostname;

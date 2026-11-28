@@ -159,6 +159,15 @@ fun LivePlayerScreen(
         current = channel2
     }
 
+    // 浮层里点某一台要「直接跳过去」。不能复用 switchTo(i - index)：stepChannelIndex
+    // 会把 direction 归一成 ±1，点第 5 台只会走到相邻那台。
+    fun selectAt(i: Int) {
+        val channel2 = channelAt(channels, i) ?: return
+        if (channel2.url == current.url) return
+        switching = true
+        current = channel2
+    }
+
     val interaction = remember { MutableInteractionSource() }
 
     Box(
@@ -329,7 +338,7 @@ fun LivePlayerScreen(
                         val active = ch.url == current.url
                         PhoneCard(
                             onClick = {
-                                if (!active) switchTo(i - index)
+                                selectAt(i)
                                 overlayVisible = false
                             },
                             containerColor = if (active) Color(0xFF3A1D12) else androidx.compose.ui.graphics.Color(0xFF10141B),

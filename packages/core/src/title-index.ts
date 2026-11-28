@@ -283,7 +283,8 @@ export function pruneIndex(
   }
   const keep = new Set<TitleIndexEntry>();
   for (const list of byLetter.values()) {
-    for (const e of list.slice(-perLetterFloor)) keep.add(e);
+    // 同样的 `slice(-0)` 陷阱：传 0 时必须什么都不留，否则整组入 keep、裁剪失效
+    for (const e of perLetterFloor > 0 ? list.slice(-perLetterFloor) : []) keep.add(e);
   }
   // `remaining` 为 0 时必须跳过：`slice(-0)` 等价于 `slice(0)`，会把**整个数组**加进
   // `keep`，裁剪彻底失效（字母覆盖率一高就会踩到，`perLetterFloor × 27` 就能超过上限）。
@@ -645,6 +646,9 @@ export function applyScan(
     if (result.tier === 'sweep') {
       // 巡检：只推进游标，不动 deepDone（它是「补齐」状态，不是「巡检」状态）
       const span = INDEX_DEEP_TARGET_PAGES - INDEX_HOT_PAGES;
+      // `pages` 为空时 Math.max() 得 -Infinity，游标会写成 NaN；而越界检查
+      // 对 NaN 的两个比较都是 false，NaN 会一路传到 `pg=NaN`。这里守住。
+      if (result.pages.length === 0) continue;
       const last = Math.max(...result.pages);
       const next = INDEX_HOT_PAGES + 1 + (((last - INDEX_HOT_PAGES) % span) + span) % span;
       cursors[result.sourceKey] = { ...cursor, sweepPage: next, sweepAt: now };
@@ -661,7 +665,11 @@ export function applyScan(
 
   // 热区先进、冷区在后：`pruneIndex` 的「留最新」按数组尾部算，冷区是老片，
   // 超出上限时应该先丢它们，所以把冷区放在前面、热区放在后面。
-  const merged = pruneIndex([...deep, ...hot]);
+  //
+  // 但**去重要按「热区优先」**：`dedupeEntries` 保留首次出现的那份，而热区刚扫到的
+  // 条目带着最新的 `pic`/`remarks`，冷区那份可能是几周前的。先把热区合并进去，
+  // 让同键条目以热区版本为准。
+  const merged = pruneIndex(mergeEntries([...deep, ...hot], hot));
   // 拆回去：按 `hot` 的键集合判定归属。
   //
   // 这里必须再 `dedupeEntries` 一次：源站分页会随新片上线漂移，上周还在第 20 页的条目

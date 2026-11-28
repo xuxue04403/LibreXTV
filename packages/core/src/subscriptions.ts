@@ -302,8 +302,11 @@ export function normalizeSubscription(data: unknown, subscriptionUrl?: string): 
     truncated: 0,
   };
   const listName = strOrUndef(obj.name) ?? name;
-  const prefix =
-    keyPrefix ?? `sub_${stableKey(JSON.stringify(obj).slice(0, 64))}`;
+  // 没有订阅地址时用整份 JSON 的哈希，**不能只取前 64 字符**：两份都以
+  // `{"name":"我的源","version":2,"sources":[{"name":"非凡...` 开头的订阅
+  // 会生成完全相同的 key 前缀，勾选/健康度/历史全串台——这正是上面注释
+  // 想避免的场景。
+  const prefix = keyPrefix ?? `sub_${stableKey(JSON.stringify(obj))}`;
 
   const sources: SourceConfig[] = [];
   const liveSources: LiveSourceConfig[] = [];

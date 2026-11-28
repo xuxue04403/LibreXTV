@@ -182,11 +182,32 @@ export const ADULT_LIVE_KEYWORDS = [
   'hot adult', 'playboy', 'brazzers',
 ];
 
+/**
+ * 英文短词必须按词边界匹配：`haystack.includes('sex')` 会命中 `Essex TV`、
+ * `Middlesex`，把正经的地方台/英国台误杀。中文词没有词边界概念，继续用 includes。
+ */
+const ADULT_LIVE_EN = /(^|[^a-z])(sex|xxx|porn|adult|erotic|playboy|brazzers|hot adult)([^a-z]|$)/;
+
+/**
+ * 从关键词表里挑出「中文/数字」那一类，供 includes 匹配。
+ *
+ * 判断方式是比较首字符的码位：ASCII 之外的即是中文（或全角符号），
+ * 数字开头（`18+`、`18禁`）也算这一类 —— 它们不会像 `sex` 那样作为
+ * 英文单词的一部分出现在正经台名里。之前用 `/[^\x00-\x7F]|^\d/` 正则做这件事，
+ * 会被 lint 的 no-control-regex 拦下，改成码位比较既等价又不用转义控制字符。
+ */
+const ADULT_LIVE_ZH = ADULT_LIVE_KEYWORDS.filter((k) => {
+  const first = k.charCodeAt(0);
+  return first > 0x7f || (first >= 0x30 && first <= 0x39);
+});
+
 /** 频道是否属于成人内容（先看分组名，再看台名；都转小写比较） */
 export function isAdultChannel(channel: { name?: string; group?: string; rawName?: string }): boolean {
   const haystack = `${channel.group || ''} ${channel.name || ''} ${channel.rawName || ''}`.toLowerCase();
   if (!haystack.trim()) return false;
-  return ADULT_LIVE_KEYWORDS.some((k) => haystack.includes(k.toLowerCase()));
+  // 中文/数字类关键词（成人、18+、午夜…）没有误伤风险，走 includes
+  if (ADULT_LIVE_ZH.some((k) => haystack.includes(k.toLowerCase()))) return true;
+  return ADULT_LIVE_EN.test(haystack);
 }
 
 /** 过滤成人频道（与点播的 adultFilter 共用同一个开关语义） */

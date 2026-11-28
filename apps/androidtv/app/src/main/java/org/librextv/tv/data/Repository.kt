@@ -849,18 +849,25 @@ class Repository(private val net: Net = Net) {
         timeoutMs: Long = 12_000,
         fast: Boolean = true,
         budgetMs: Long = PROBE_BUDGET_MS,
-    ): Map<CategoryKey, Int> = coroutineScope {
+    ): Map<CategoryKey, Int>? = coroutineScope {
         if (sources.isEmpty()) return@coroutineScope CategoryKey.home.associateWith { 0 }
 
         if (fast) {
-            val tables: List<List<SourceCategory>?> = withTimeoutOrNull(budgetMs) {
+            val tables: List<List<SourceCategory>?>? = withTimeoutOrNull(budgetMs) {
                 sources.map { source ->
                     async {
                         // 单源失败/超时只影响它自己：null 表示这张表这次没拿到
                         withTimeoutOrNull(timeoutMs) { runCatching { categoriesOf(source) }.getOrNull() }
                     }
                 }.awaitAll()
-            } ?: List(sources.size) { null }
+            }
+            // 整体预算耗尽时 tables 是 null。**必须把 null 透传出去**，不能在这里
+            // 兜成「每个源都没分类」：上游拿到全 0 的 Map 会以为「这次探测成功、
+            // 但真的一无所有」，把空结论写进 DataStore。弱网下探测超时一次，首页
+            // 分类入口就永久消失（重启也读回那个空结论，签名没变也不会重探）。
+            if (tables == null) return@coroutineScope null
+            // 一个源的表都没拿到，同样等于「这次没探成」，结论不可信
+            if (tables.all { it == null }) return@coroutineScope null
             return@coroutineScope CategoryKey.home.associateWith { key ->
                 tables.count { table -> table != null && Categories.typeIds(table, key, 1).isNotEmpty() }
             }

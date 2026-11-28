@@ -109,6 +109,13 @@ function VodSources() {
         ...prev,
         [source.key]: outcome.ok ? `可用 · ${outcome.list.length} 条 · ${outcome.ms}ms` : `不可用 · ${outcome.error}`,
       }));
+    } catch (err) {
+      // searchSources 在「所有源都被中断 / 参数不合法」时会抛，不接的话
+      // 按钮转完圈什么也不显示，用户不知道这源到底行不行。
+      setTestResults((prev) => ({
+        ...prev,
+        [source.key]: `不可用 · ${err instanceof Error ? err.message : '测试失败'}`,
+      }));
     } finally {
       setTesting(null);
     }
@@ -652,6 +659,7 @@ function DataPanel() {
     if (window.librextv) {
       const result = await window.librextv.saveText('librextv-backup.json', content);
       if (result.ok) toast.ok('配置已导出');
+      else if (!result.canceled) toast.err(result.error || '导出失败');
     } else {
       await navigator.clipboard.writeText(content);
       toast.ok('已复制到剪贴板');
@@ -664,7 +672,12 @@ function DataPanel() {
       return;
     }
     const file = await window.librextv.openText();
-    if (!file.ok || !file.content) return;
+    if (!file.ok) {
+      // 取消不算错误，只有真出错（文件被占用/不是文本/读取失败）才提示
+      if (!file.canceled && file.error) toast.err(file.error);
+      return;
+    }
+    if (!file.content) return;
     const snapshot = parseSnapshot(file.content);
     if (!snapshot) {
       toast.err('不是可识别的 LibreXTV 配置（文件里没有任何可导入的源或历史）');

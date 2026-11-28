@@ -69,7 +69,8 @@ export function isSourceDisabled(entry: SourceHealthEntry | undefined, now: numb
  */
 export function recordSourceFailure(
   current: SourceHealthEntry | undefined,
-  now: number
+  now: number,
+  key = ''
 ): { entry: SourceHealthEntry; event: SourceDisableEvent | null } {
   if (current && current.disabledUntil > now) {
     return { entry: current, event: null };
@@ -97,7 +98,10 @@ export function recordSourceFailure(
       disabledUntil: permanent ? SOURCE_HEALTH_PERMANENT : now + ttlMs,
       updatedAt: now,
     },
-    event: { key: '', level, permanent, ttlMs },
+    // key 必须由调用方给：`SourceDisableEvent` 的类型承诺带 key，
+    // 早先这里恒返回空串，桌面端只能在 store 里回填一次，Android/TV 端
+    // 直接消费这个事件会拿到空 key（拿去查源就查不到）。
+    event: { key, level, permanent, ttlMs },
   };
 }
 

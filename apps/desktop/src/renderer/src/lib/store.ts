@@ -372,11 +372,18 @@ export const useAppStore = create<AppState>()(
           // 否则下次内置源清单升级时这些刚恢复的地址又会被当成「用户删掉的」。
           const restored = new Set([...vod.map((x) => x.url), ...live.map((x) => x.url)]);
           // 恢复默认同样只勾选「默认启用」的那几个，「恢复默认源」不该顺手把
-          // 一万多个境外台打开（那是打开后立刻卡死）
+          // 一万多个境外台打开（那是打开后立刻卡死）；点播侧同理，不该把大陆直连
+          // 不通的那 8 个源也勾上——它们每次搜索都要白等满超时。
           const defaultLiveSelected = new Set(DEFAULT_LIVE_SELECTED_KEYS);
+          const defaultVodSelected = new Set(DEFAULT_SELECTED_KEYS);
           return {
             sources: [...s.sources, ...vod],
-            selectedKeys: [...new Set([...s.selectedKeys, ...vod.map((x) => x.key)])],
+            selectedKeys: [
+              ...new Set([
+                ...s.selectedKeys,
+                ...vod.filter((x) => defaultVodSelected.has(x.key)).map((x) => x.key),
+              ]),
+            ],
             liveSources: [...s.liveSources, ...live],
             liveSelectedKeys: [
               ...new Set([
@@ -504,8 +511,8 @@ export const useAppStore = create<AppState>()(
           if (ok) {
             return { sourceHealth: { ...s.sourceHealth, [key]: recordSourceSuccess(current, now) } };
           }
-          const result = recordSourceFailure(current, now);
-          if (result.event) event = { ...result.event, key };
+          const result = recordSourceFailure(current, now, key);
+          if (result.event) event = result.event;
           return { sourceHealth: { ...s.sourceHealth, [key]: result.entry } };
         });
         return event;
@@ -624,16 +631,35 @@ export const useAppStore = create<AppState>()(
       removeHistory: (id) => set((s) => ({ history: s.history.filter((h) => h.id !== id) })),
 
       replaceAll: (data) =>
-        set((s) => ({
-          sources: data.sources ?? s.sources,
-          selectedKeys: data.selectedKeys ?? s.selectedKeys,
-          liveSources: data.liveSources ?? s.liveSources,
-          liveSelectedKeys: data.liveSelectedKeys ?? s.liveSelectedKeys,
-          history: data.history ?? s.history,
-          favorites: data.favorites ?? s.favorites,
-          liveFavorites: data.liveFavorites ?? s.liveFavorites,
-          settings: data.settings ?? s.settings,
-        })),
+        set((s) => {
+          const sources = data.sources ?? s.sources;
+          const liveSources = data.liveSources ?? s.liveSources;
+          // 源列表被整份替换后，本地这些「按源 key 记账」的状态必须跟着收敛，
+          // 否则同一批 key（builtin_3 之类）换成了另一个站，用户刚导入就发现
+          // 新源「连续失败已暂停」——那是上一批同名 key 留下的健康度。
+          // recentSearches / skipMarks / subscriptions 是用户偏好、与源列表
+          // 没有强绑定，导入后保留。
+          const vodKeys = new Set(sources.map((x) => x.key));
+          const liveKeys = new Set(liveSources.map((x) => x.key));
+          const sourceHealth: SourceHealthMap = {};
+          for (const [key, entry] of Object.entries(s.sourceHealth ?? {})) {
+            if (vodKeys.has(key) || liveKeys.has(key)) sourceHealth[key] = entry;
+          }
+          return {
+            sources,
+            selectedKeys: data.selectedKeys ?? s.selectedKeys,
+            liveSources,
+            liveSelectedKeys: data.liveSelectedKeys ?? s.liveSelectedKeys,
+            history: data.history ?? s.history,
+            favorites: data.favorites ?? s.favorites,
+            liveFavorites: data.liveFavorites ?? s.liveFavorites,
+            settings: data.settings ?? s.settings,
+            sourceHealth,
+            // 「我删过哪些内置源」是针对上一份源列表记的，源被整份替换后这个
+            // 记录只会让以后的内置源升级补不回来，一并清掉。
+            removedDefaultUrls: [],
+          };
+        }),
     }),
     {
       name: 'librextv-desktop-v1',

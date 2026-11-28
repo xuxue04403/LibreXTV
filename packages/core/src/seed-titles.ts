@@ -127,7 +127,15 @@ export function loadSeedTitles(cachePath?: string | null): void {
 /** 后台加载一遍（幂等），供主进程启动时预热 */
 export function primeSeedTitles(cachePath?: string | null): Promise<void> {
   if (byInitials) return Promise.resolve();
-  if (!loading) loading = Promise.resolve().then(() => loadSeedTitles(cachePath));
+  if (!loading) {
+    loading = Promise.resolve()
+      .then(() => loadSeedTitles(cachePath))
+      .then(() => {
+        // 加载失败时 `loading` 必须复位，否则后面 OTA 下载下来的表
+        // 永远拿不到机会生效——`if (!loading)` 会一直短路。
+        if (!byInitials) loading = null;
+      });
+  }
   return loading;
 }
 

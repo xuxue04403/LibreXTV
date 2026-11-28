@@ -24,8 +24,12 @@ const val DESIGN_HEIGHT_DP = 540f
  *
  * 下限不能设得太高：720p 却报了 640dpi 的盒子逻辑宽度只有 320dp，
  * 若卡在 0.6 就会把内容裁掉（溢出）。宁可字小一点也不能切掉。
+ *
+ * 2026-11 复核实测：下限原为 0.35，而 320/960 = 0.333 —— 被抬到 0.35 之后
+ * 内容比屏幕宽 5%，反而溢出。下限必须低于最窄设备的真实比例，
+ * 取 0.25 留足余量（对应 240dp 宽，比任何已知电视盒子都窄）。
  */
-private const val MIN_SCALE = 0.35f
+private const val MIN_SCALE = 0.25f
 private const val MAX_SCALE = 5f
 
 /**

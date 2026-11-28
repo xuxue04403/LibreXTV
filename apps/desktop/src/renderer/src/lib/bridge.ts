@@ -157,6 +157,9 @@ export const http: HttpClient = {
       return fetchHttp.stream(url, options);
     }
     const streamId = ++streamSeq;
+    // 开流前就已经取消了：不走 IPC，否则会开一条没人收的流，
+    // 主进程那边只能等 idleTimeout（默认 30 秒）自己断掉。
+    if (options.signal?.aborted) throw new Error('请求已取消');
     const parts: Uint8Array[] = [];
     let total = 0;
     let cancelled = false;

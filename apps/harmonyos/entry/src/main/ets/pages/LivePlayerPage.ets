@@ -30,6 +30,12 @@ export struct LivePlayerPage {
   private controller: XComponentController = new XComponentController();
   private watchdog: number = -1;
   private playlist: LiveChannel[] = [];
+  /**
+   * 换台序号：连点「下一个台」时，前一个频道的 `createAVPlayer` 可能后完成。
+   * 旧那一轮如果照样把它赋给 `this.player`，就会出现两台同时出声、
+   * native 句柄泄漏，之后报 `5400102`。
+   */
+  private openSeq: number = 0;
 
   aboutToAppear(): void {
     const target = appModel.liveTarget;
@@ -48,6 +54,9 @@ export struct LivePlayerPage {
   }
 
   aboutToDisappear(): void {
+    // 离开页面时把序号推进一格：还在 await 里的 open() 回来会发现序号变了，
+    // 直接丢弃那个 player，不再接管 surface、不再计时。
+    this.openSeq += 1;
     this.stopWatchdog();
     this.release();
   }
@@ -74,31 +83,50 @@ export struct LivePlayerPage {
   }
 
   private async open(): Promise<void> {
+    const mySeq = ++this.openSeq;
     this.errorText = '';
     this.buffering = true;
     await this.release();
+    // release() 里也有 await，回来可能已经被下一次 open() 或离开页面抢先。
+    if (mySeq !== this.openSeq) {
+      return;
+    }
     try {
       const p = await media.createAVPlayer();
+      // 创建过程是异步的：这期间用户可能已经切了台或退了页，
+      // 这一轮的 player 必须就地销毁，绝不能赋给 this.player。
+      if (mySeq !== this.openSeq) {
+        try {
+          await p.release();
+        } catch (err) {
+          // 忽略
+        }
+        return;
+      }
       this.player = p;
       p.on('error', (err: BusinessError) => {
+        // 迟到的错误只属于被换掉的那个 player，不能改当前界面状态。
+        if (this.player !== p) {
+          return;
+        }
         this.buffering = false;
         this.errorText = `这个频道打不开：${err.message}`;
         this.stopWatchdog();
       });
       p.on('stateChange', (state: string) => {
-        const player = this.player;
-        if (player === null) {
+        // 同理：上一个频道迟到的 stateChange 不能驱动现在这个 player。
+        if (this.player !== p) {
           return;
         }
         if (state === 'initialized') {
           if (this.surfaceId.length > 0) {
-            player.surfaceId = this.surfaceId;
+            p.surfaceId = this.surfaceId;
           }
-          player.prepare();
+          p.prepare();
         } else if (state === 'prepared') {
           this.buffering = false;
           this.stopWatchdog();
-          player.play();
+          p.play();
         } else if (state === 'playing') {
           this.buffering = false;
           this.errorText = '';
@@ -115,6 +143,9 @@ export struct LivePlayerPage {
         }
       }, LIVE_START_TIMEOUT_MS) as number;
     } catch (err) {
+      if (mySeq !== this.openSeq) {
+        return;
+      }
       this.buffering = false;
       this.errorText = `播放器初始化失败：${(err as BusinessError).message}`;
     }
@@ -305,6 +336,10 @@ export struct LivePlayerPage {
                   this.channelName = ch.name;
                   this.channelUrl = ch.url;
                   this.groupName = ch.group ?? '未分组';
+                  // 与 switchTo 对齐：收藏按钮读的是 favorite 与 liveTarget，
+                  // 列表点击以前只改名字和地址，导致右上角收藏状态还停留在上一个台。
+                  this.favorite = appModel.isLiveFavorite(ch.url);
+                  appModel.liveTarget = ch;
                   this.showList = false;
                   this.open();
                 })

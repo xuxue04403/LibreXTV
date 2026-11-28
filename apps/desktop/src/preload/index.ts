@@ -147,9 +147,9 @@ const bridge = {
   },
   minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('shell:open-external', url),
-  saveText: (name: string, content: string): Promise<{ ok: boolean; path?: string; canceled?: boolean }> =>
+  saveText: (name: string, content: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }> =>
     ipcRenderer.invoke('dialog:save-text', name, content),
-  openText: (): Promise<{ ok: boolean; path?: string; content?: string; canceled?: boolean }> =>
+  openText: (): Promise<{ ok: boolean; path?: string; content?: string; canceled?: boolean; error?: string }> =>
     ipcRenderer.invoke('dialog:open-text'),
   dlnaDiscover: (): Promise<{ ok: boolean; devices: DlnaDeviceInfo[]; error?: string }> =>
     ipcRenderer.invoke('dlna:discover'),

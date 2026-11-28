@@ -36,9 +36,19 @@ export default class EntryAbility extends UIAbility {
 
   onWindowStageDestroy(): void {
     hilog.info(DOMAIN, TAG, 'onWindowStageDestroy');
+    // 退到后台/窗口销毁时把防抖窗口里的最后一次变更写掉：
+    // saveSoon 有 400ms 防抖，用户在这 400ms 内划掉应用会丢最后一次改动
+    // （播放进度、刚点的收藏/设置项都在里面）。
+    appModel.flushStore();
+  }
+
+  onBackground(): void {
+    hilog.info(DOMAIN, TAG, 'onBackground');
+    appModel.flushStore();
   }
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'onDestroy');
+    appModel.flushStore();
   }
 }

@@ -253,6 +253,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 种子表在线更新 + 每日增量；与 warmJob 分开，用户搜索时不必取消它 */
     private var seedUpdateJob: Job? = null
 
+    /**
+     * 正在跑的直播列表加载任务。
+     *
+     * 强制刷新要真的把上一轮掐掉：只把 loading 置 false 再起新一轮的话，旧轮次
+     * 收尾时还会拿自己的结果覆盖界面（旧的一批频道盖掉新的），而且 `live.loading`
+     * 会被旧轮次改回 false，让并发保护失效。
+     */
+    private var liveJob: Job? = null
+
     /** 种子表的来源与条数，设置页展示「拼音库有多大、是不是在线更新过的」 */
     var seedOrigin by mutableStateOf(SeedTitles.origin)
         private set
@@ -880,7 +889,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         key,
                         adultFilter = _data.value.settings.adultFilter,
                         // 有缓存时这一轮是「后台刷新」：命中 5 分钟内存缓存就够，别把整排源再打一遍
-                        useCache = cached.isNullOrEmpty(),
+                        useCache = !cached.isNullOrEmpty(),
                     )
                     val partial = doneLock.withLock {
                         done += result
@@ -1095,7 +1104,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     search = search.copy(
                         outcomes = outcomes.filter { it.sourceKey != CACHE_SOURCE_KEY },
                         groups = Parsers.group(items),
-                        loading = outcomes.size < sources.size,
+                        // 「本地缓存」是开局塞进去的假源，不是真去请求过的源。
+                        // 直接数 outcomes.size 会把它算一个，导致最后一个真源还没
+                        // 回来就已经判定「搜完了」，转圈提前消失、失败 chip 也不出现。
+                        loading = outcomes.count { it.sourceKey != CACHE_SOURCE_KEY } < sources.size,
                         fromCache = false,
                     )
                 }
@@ -1170,6 +1182,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         val mySeq = searchSeq
         viewModelScope.launch {
+            // 用户可能在上一次点击之后又搜了别的词：先守一次，别把新一轮结果清空。
+            // 这里必须放在写 state 之前 —— 放在网络返回之后（原实现）的话，只要
+            // 重试期间用户改了词，就会把新一轮里同名源那条清成空并标 ok=true，
+            // 用户看到该源结果凭空消失，而且不会自愈。
+            if (mySeq != searchSeq) return@launch
             // 重试期间把那一条标成「重试中」：不改 loading（整轮并没有在跑），
             // 只把该源的条目替换成一个占位，让用户看到反应。
             search = search.copy(
@@ -1606,13 +1623,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             showToast("还没有启用任何直播源")
             return
         }
-        if (live.loading) return
+        // force 是「用户主动点重新加载」，必须能打断正在跑的那一轮；
+        // 原来的 `if (live.loading) return` 把强制刷新也挡掉了，用户在设置里点了
+        // 「刷新直播源」却毫无反应（界面上那个转圈其实是上一轮的残留）。
+        if (live.loading && !force) return
         val adultFilter = _data.value.settings.adultFilter
         val signature = liveSignature(sources, adultFilter)
         live = live.copy(loading = true)
         liveBytes = 0L
 
-        viewModelScope.launch {
+        // 强制刷新：先掐掉上一轮，否则旧轮次的结果会在新轮次之后写回来。
+        if (force) liveJob?.cancel()
+        liveJob = viewModelScope.launch {
             // 1) 缓存优先
             if (!force) {
                 val cached = runCatching { store.liveCache(signature) }.getOrNull()
@@ -1774,15 +1796,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             showToast("请填写 http(s) 开头的采集接口地址")
             return false
         }
-        // 同一地址加两次会让搜索/分类对同一个接口发两份请求，详情页的「同片源」
-        // 也会出现两个同名条目。导入订阅与恢复默认源都做了去重，手动添加漏了。
-        if (_data.value.sources.any { it.url.trimEnd('/') == cleanUrl }) {
-            showToast("这个采集接口已经添加过了")
-            return false
-        }
         val key = "custom_${UUID.randomUUID().toString().take(8)}"
         viewModelScope.launch {
+            var added = false
             store.update { data ->
+                // 去重必须在 store.update 里做：DataStore 的 edit 是串行区，
+                // 在这里读到的 sources 一定是上一笔写入之后的。
+                // 放在 launch 外面用 _data.value 判断的话，连按两次「添加」
+                //（设置页按钮没有 enabled 守卫）两次都会读到同一份旧快照，
+                // 双双通过去重，于是追加两条 url 相同的源。
+                if (data.sources.any { it.url.trimEnd('/') == cleanUrl }) return@update data
+                added = true
                 data.copy(
                     sources = data.sources + VodSource(
                         key = key,
@@ -1793,7 +1817,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     selected = data.selected + key,
                 )
             }
-            showToast("已添加点播源")
+            if (added) showToast("已添加点播源") else showToast("这个采集接口已经添加过了")
         }
         return true
     }
@@ -1838,14 +1862,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             showToast("请填写 http(s) 开头的 M3U 地址")
             return false
         }
-        // 同 addSource：重复地址会在直播列表里出现两份同样的频道
-        if (_data.value.liveSources.any { it.url.trimEnd('/') == cleanUrl }) {
-            showToast("这个直播源已经添加过了")
-            return false
-        }
         val key = "live_${UUID.randomUUID().toString().take(8)}"
         viewModelScope.launch {
+            var added = false
             store.update { data ->
+                // 同 addSource：去重放进 DataStore 的串行区，避免连点两次加出两条
+                if (data.liveSources.any { it.url.trimEnd('/') == cleanUrl }) return@update data
+                added = true
                 data.copy(
                     liveSources = data.liveSources + LiveSource(
                         key = key,
@@ -1856,7 +1879,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     liveSelected = data.liveSelected + key,
                 )
             }
-            showToast("已添加直播源")
+            if (added) showToast("已添加直播源") else showToast("这个直播源已经添加过了")
         }
         return true
     }

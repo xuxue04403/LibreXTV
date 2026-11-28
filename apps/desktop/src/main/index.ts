@@ -10,7 +10,7 @@ import {
   updateSeedTableIfNeeded,
 } from './seed-updater';
 import { startMediaProxy, assertAllowedTarget, fetchChecked, readLimited, type MediaProxy } from './proxy';
-import { castToDevice, discoverDevices, parseDeviceDescription, stopCast, type DlnaDevice } from './dlna';
+import { castToDevice, discoverDevices, isAllowedCastAddress, parseDeviceDescription, stopCast, type DlnaDevice } from './dlna';
 import { fetchRecommend } from './recommend';
 import { probeQuality } from './quality';
 import type { SourceConfig } from '@librextv/core';
@@ -65,6 +65,43 @@ function describeFetchError(err: unknown): string {
 let win: BrowserWindow | null = null;
 let proxy: MediaProxy | null = null;
 
+/**
+ * 把站外链接交给系统浏览器前的最后一道过滤。
+ *
+ * 这里不做域名白名单——片源里的「官方站点」本来就五花八门，写死白名单
+ * 会导致一半链接点不动。真正要挡的是「把系统浏览器当跳板」的那类地址：
+ * - 非 http(s) 协议（`javascript:`、`file:`、`ms-*:` 之类）；
+ * - 带内嵌账号密码的 URL（很多浏览器/系统会把它当钓鱼弹窗）；
+ * - 指向本机或内网的地址（例如某个源把 `http://127.0.0.1:8080` 塞进
+ *   片名里，点一下就在用户自己的浏览器里打开一个本地服务）。
+ */
+function openExternalChecked(raw: string): void {
+  let target: URL;
+  try {
+    target = new URL(raw);
+  } catch {
+    return;
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') return;
+  if (target.username || target.password) return;
+  const host = target.hostname.replace(/^\[|\]$/g, '');
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host === '' ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  ) {
+    return;
+  }
+  void shell.openExternal(target.href).catch(() => undefined);
+}
+
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
 /**
@@ -111,14 +148,14 @@ function createWindow(): void {
 
   // 站外链接交给系统浏览器，不在应用内开新窗口
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    openExternalChecked(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (event, url) => {
     const current = win?.webContents.getURL() ?? '';
     if (url !== current) {
       event.preventDefault();
-      if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+      openExternalChecked(url);
     }
   });
 
@@ -379,9 +416,17 @@ ipcMain.handle(
  * 这里改为边收边把分块推给渲染层，主播只要几百毫秒就能看到第一批频道。
  *
  * 每个流带一个递增 id，配 `http:stream:cancel` 用于切页/换源时中止。
+ *
+ * id 由渲染层（preload）在开流前分配 —— 必须在 `invoke` 之前就注册好 `on` 监听，
+ * 否则第一批分块会在监听器挂上之前到达而丢失。但 id 只在本 webContents 内有意义，
+ * 所以 Map 的键是 `senderId:streamId`：A 窗口的 cancel 不可能中止 B 窗口的流
+ * （它们各自从 1 开始编号，不加命名空间就会互相 cancel）。
  */
-const activeStreams = new Map<number, AbortController>();
-let streamSeq = 0;
+const activeStreams = new Map<string, AbortController>();
+
+function streamKeyOf(senderId: number, streamId: number): string {
+  return `${senderId}:${streamId}`;
+}
 
 ipcMain.handle(
   'http:stream',
@@ -398,9 +443,9 @@ ipcMain.handle(
       return { ok: false, status: 400, url, error: err instanceof Error ? err.message : '地址不可用', ms: 0 };
     }
 
-    const streamId = options?.streamId ?? ++streamSeq;
+    const owner = streamKeyOf(event.sender.id, options?.streamId ?? 0);
     const controller = new AbortController();
-    activeStreams.set(streamId, controller);
+    activeStreams.set(owner, controller);
     // 不再用 `http:stream:started` 广播分配 id：那是 webContents 级广播，并发开流时
     // 各 invoke 会互相抢「第一个收到的 id」。现在 id 由 preload 在开流前定好传下来。
     const idleTimeoutMs = Math.min(120_000, Math.max(5_000, options?.idleTimeoutMs ?? 30_000));
@@ -453,7 +498,7 @@ ipcMain.handle(
           return { ok: false, status: 413, url, headers: headerMap, error: '响应体过大', ms: Date.now() - started };
         }
         // 拷贝一份再发：value 的 buffer 可能被 undici 复用
-        event.sender.send('http:stream:chunk', streamId, Buffer.from(value));
+        event.sender.send('http:stream:chunk', options?.streamId ?? 0, Buffer.from(value));
       }
       return { ok: true, status: res.status, url: res.url || url, headers: headerMap, bytes, ms: Date.now() - started };
     } catch (err) {
@@ -470,14 +515,17 @@ ipcMain.handle(
       };
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
-      activeStreams.delete(streamId);
+      activeStreams.delete(owner);
     }
   }
 );
 
-ipcMain.handle('http:stream:cancel', (_event, streamId: number) => {
-  activeStreams.get(streamId)?.abort();
-  activeStreams.delete(streamId);
+ipcMain.handle('http:stream:cancel', (event, streamId: number) => {
+  // 只能取消自己窗口开出来的流：id 由各 webContents 独立编号，
+  // 不加这一层归属校验的话，另一个窗口连号就能把它的流打断。
+  const key = streamKeyOf(event.sender.id, streamId);
+  activeStreams.get(key)?.abort();
+  activeStreams.delete(key);
 });
 
 ipcMain.handle('window:toggle-fullscreen', () => {
@@ -493,20 +541,27 @@ ipcMain.handle('window:is-fullscreen', () => win?.isFullScreen() ?? false);
 
 ipcMain.handle('window:minimize', () => win?.minimize());
 
-ipcMain.handle('shell:open-external', async (_event, url: string) => {
-  if (/^https?:\/\//i.test(url)) await shell.openExternal(url);
+ipcMain.handle('shell:open-external', (_event, url: string) => {
+  if (typeof url !== 'string') return;
+  openExternalChecked(url);
 });
 
 ipcMain.handle('dialog:save-text', async (_event, defaultName: string, content: string) => {
   if (!win) return { ok: false as const, canceled: true };
-  const result = await dialog.showSaveDialog(win, {
-    // 文件名只取 basename：渲染层不能借此把文件写到任意目录
-    defaultPath: path.basename(String(defaultName || 'librextv-export.json')),
-    filters: [{ name: 'JSON', extensions: ['json'] }],
-  });
-  if (result.canceled || !result.filePath) return { ok: false as const, canceled: true };
-  await fs.writeFile(result.filePath, content, 'utf8');
-  return { ok: true as const, path: result.filePath };
+  // 磁盘满 / 无权限 / 路径被占用都会抛：不接住的话 invoke 直接 reject，
+  // 渲染层只拿到一个不认识的异常，用户看到的是「没反应」。
+  try {
+    const result = await dialog.showSaveDialog(win, {
+      // 文件名只取 basename：渲染层不能借此把文件写到任意目录
+      defaultPath: path.basename(String(defaultName || 'librextv-export.json')),
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false as const, canceled: true };
+    await fs.writeFile(result.filePath, content, 'utf8');
+    return { ok: true as const, path: result.filePath };
+  } catch (err) {
+    return { ok: false as const, error: err instanceof Error ? err.message : '保存失败' };
+  }
 });
 
 /**
@@ -538,6 +593,12 @@ async function assertCastableDevice(device: DlnaDevice): Promise<DlnaDevice> {
   if (deviceUrl.protocol !== 'http:' && deviceUrl.protocol !== 'https:') throw new Error('设备地址协议不受支持');
   if (control.protocol !== 'http:' && control.protocol !== 'https:') throw new Error('控制地址协议不受支持');
   if (control.origin !== deviceUrl.origin) throw new Error('控制地址与设备不同源');
+  // `allowPrivate = true` 是给 DLNA 留的逃生口（设备必然在内网），但**不能无边界**：
+  // 这里的 location/controlUrl 都来自渲染层入参，不加白名单就能被指向
+  // 169.254.169.254 之类的云元数据地址。只放行本机网段内的私网 IPv4。
+  if (!isAllowedCastAddress(deviceUrl.href) || !isAllowedCastAddress(control.href)) {
+    throw new Error('设备地址不在允许的局域网范围内');
+  }
 
   // 最后一步：真的去读一次设备描述，用 XML 里声明的 controlURL 作为可信来源。
   // 这既是「设备确实存在」的确认，也让 SOAP 的目标不能再由渲染层随意指定。
@@ -588,21 +649,28 @@ ipcMain.handle('dlna:stop', async (_event, device: DlnaDevice) => {
   }
 });
 
-ipcMain.handle('dialog:open-text', async () => {  if (!win) return { ok: false as const, canceled: true };
-  const result = await dialog.showOpenDialog(win, {
-    properties: ['openFile'],
-    filters: [{ name: 'JSON', extensions: ['json', 'txt'] }],
-  });
-  const file = result.filePaths[0];
-  if (result.canceled || !file) return { ok: false as const, canceled: true };
-  // 用户选错文件（比如一个几 GB 的视频）时，原来的 readFile(file,'utf8')
-  // 会把整个文件读进主进程内存。订阅/备份都是文本，10MB 足够，超了直接拒绝。
-  const stat = await fs.stat(file);
-  if (stat.size > 10 * 1024 * 1024) {
-    return { ok: false as const, canceled: false, error: '文件超过 10MB，可能不是订阅或备份文件' };
+ipcMain.handle('dialog:open-text', async () => {
+  if (!win) return { ok: false as const, canceled: true };
+  // 选中的文件可能是个目录、可能被别的程序锁住、可能是二进制：
+  // readFile 会抛，不接住就是「点导入没反应」。
+  try {
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json', 'txt'] }],
+    });
+    const file = result.filePaths[0];
+    if (result.canceled || !file) return { ok: false as const, canceled: true };
+    // 用户选错文件（比如一个几 GB 的视频）时，原来的 readFile(file,'utf8')
+    // 会把整个文件读进主进程内存。订阅/备份都是文本，10MB 足够，超了直接拒绝。
+    const stat = await fs.stat(file);
+    if (stat.size > 10 * 1024 * 1024) {
+      return { ok: false as const, canceled: false, error: '文件超过 10MB，可能不是订阅或备份文件' };
+    }
+    const content = await fs.readFile(file, 'utf8');
+    return { ok: true as const, path: file, content };
+  } catch (err) {
+    return { ok: false as const, canceled: false, error: err instanceof Error ? err.message : '读取失败' };
   }
-  const content = await fs.readFile(file, 'utf8');
-  return { ok: true as const, path: file, content };
 });
 
 const gotLock = app.requestSingleInstanceLock();
@@ -627,14 +695,32 @@ if (!gotLock) {
       // 每日增量得等渲染层告诉主进程「用户启用了哪些源」，见 `seed:pull-delta`。
       void updateSeedTableIfNeeded().catch(() => false);
     });
-    proxy = await startMediaProxy();
+    // 媒体代理单独兜住：端口耗尽/监听失败时仍然要出窗口。代理不可用时
+    // `app:info` 返回空 proxyBase，渲染层的 `proxify` 会回退成直连。
+    try {
+      proxy = await startMediaProxy();
+    } catch (err) {
+      console.error('[main] 媒体代理启动失败，降级为直连：', err);
+      proxy = null;
+    }
     buildMenu();
     createWindow();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
-  });
+  })
+    // 启动链任一步 reject 的兜底：没有这段的话进程活着但一个窗口都没有，
+    // 用户看到的是「双击图标没反应」，也无从反馈。
+    .catch((err: unknown) => {
+      console.error('[main] 启动失败：', err);
+      try {
+        dialog.showErrorBox('LibreXTV 启动失败', err instanceof Error ? err.message : String(err));
+      } catch {
+        /* 极端情况下连对话框都建不出来，只能靠 stderr */
+      }
+      app.quit();
+    });
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();

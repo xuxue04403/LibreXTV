@@ -145,6 +145,16 @@ export class AppModel {
    * 无条件写回就会把新词的结果覆盖成旧词的（状态行与分组都会错）。
    */
   private searchSeq: number = 0;
+  /**
+   * 详情请求序号：同一部片子点「其它源」时，先发的请求可能后返回。
+   * 详情对象每轮都是新的，迟到的旧响应会写进新源的对象里 → 换源播出错片。
+   */
+  private detailSeq: number = 0;
+  /**
+   * 直播加载序号：加载途中改/删直播源时，旧轮次的结果不能算数，
+   * 否则被停用的源里的频道会带着 loadedOnce=true 留在列表里。
+   */
+  private liveSeq: number = 0;
   private storage: Storage = new Storage();
   private started: boolean = false;
   version: number = 0;
@@ -162,14 +172,20 @@ export class AppModel {
     if (this.started) {
       return;
     }
-    this.started = true;
+    // started 必须最后置位：中途 any await 抛错时如果已经标了「已启动」，
+    // 界面再调 start() 会直接 return，源表永远是空的且无法恢复。
     this.appVersion = await readAppVersion(context);
     await this.storage.init(context);
     const stored = this.storage.loadSync();
     const text = await readDefaultsText(context);
     const parsed: DefaultsParsed = parseDefaults(text);
     this.data = mergeDefaults(stored, parsed);
-    this.persist();
+    // 清单读不到时 mergeDefaults 原样返回，这里也就别覆盖磁盘上的备份数据；
+    // 只有真的合并成功（或本来就已 seeded）才落盘。
+    if (this.data.seeded) {
+      this.persist();
+    }
+    this.started = true;
     this.bump();
   }
 
@@ -181,6 +197,17 @@ export class AppModel {
 
   private persist(): void {
     this.storage.saveSoon(this.data);
+  }
+
+  /**
+   * 立即把待写数据落盘。
+   *
+   * Storage 的写入有 400ms 防抖，用来避免播放进度每秒一次回调打满 IO；
+   * 但应用退到后台/被划掉时不会有人再等这 400ms，必须由 EntryAbility 主动冲一次，
+   * 否则最后一次进度、刚点的收藏/设置项会丢。
+   */
+  flushStore(): void {
+    this.storage.flush();
   }
 
   /** 切页（记录返回栈） */
@@ -288,27 +315,40 @@ export class AppModel {
   // ---------------- 详情 ----------------
 
   async openDetail(item: SearchItem, group: SearchItem[]): Promise<void> {
+    // 每次开详情都换一个新的 detail 对象，迟到的旧响应必须被丢弃：
+    // 否则「点同片其它源」连点两次时，旧源的 episodes 会写进新源的详情里，
+    // 点播放就拿 B 源的 id 播 A 源的地址，进度和收藏全记到 B 上。
+    const mySeq = ++this.detailSeq;
+    const state = new DetailState();
     this.detailTarget = new DetailTarget(item, group);
-    this.detail = new DetailState();
-    this.detail.loading = true;
+    this.detail = state;
+    state.loading = true;
     this.go(PageId.Detail);
     const source = this.findSource(item.sourceKey);
     if (source === undefined) {
-      this.detail.loading = false;
-      this.detail.error = '这个源已被停用或删除';
+      state.loading = false;
+      state.error = '这个源已被停用或删除';
       this.bump();
       return;
     }
     try {
       const vod = await fetchDetail(source, item.vodId);
-      this.detail.detail = vod;
+      if (mySeq !== this.detailSeq) {
+        return;
+      }
+      state.detail = vod;
       this.bump();
     } catch (err) {
-      this.detail.error = describeError(err as Object);
+      if (mySeq !== this.detailSeq) {
+        return;
+      }
+      state.error = describeError(err as Object);
       this.bump();
     } finally {
-      this.detail.loading = false;
-      this.bump();
+      if (mySeq === this.detailSeq) {
+        state.loading = false;
+        this.bump();
+      }
     }
   }
 
@@ -350,12 +390,18 @@ export class AppModel {
   // ---------------- 直播 ----------------
 
   async loadLive(force: boolean): Promise<void> {
-    if (this.live.loading) {
+    // force（用户点了重试/切了源）要能打断在途那一轮：只看 loading 的话，
+    // 改完源点刷新会被直接吞掉，用户以为按钮坏了。序号会作废旧轮次。
+    if (this.live.loading && !force) {
       return;
     }
     if (this.live.loadedOnce && !force) {
       return;
     }
+    // 序号守卫：加载途中用户可能删/改直播源再触发一轮。旧轮次回来时
+    // 不能写 channels、更不能把 loadedOnce 置 true —— 否则被停用的源里
+    // 的频道会带着「已加载」状态留在列表里，而且再也不会重新拉。
+    const mySeq = ++this.liveSeq;
     this.live.loading = true;
     this.live.statuses = [];
     this.live.bytes = 0;
@@ -363,20 +409,38 @@ export class AppModel {
     const sources = this.activeLiveSources();
     try {
       const result = await loadLiveAll(sources, (st: LiveStatus, bytes: number) => {
+        if (mySeq !== this.liveSeq) {
+          return;
+        }
         this.live.statuses = this.live.statuses.concat([st]);
         this.live.bytes = bytes;
         this.bump();
       });
+      if (mySeq !== this.liveSeq) {
+        return;
+      }
       this.live.channels = dedupeChannels(result.channels);
       this.live.statuses = result.statuses;
       this.live.bytes = result.bytes;
       this.live.groups = collectLiveGroups(this.live.channels);
+      // 分组可能整组消失（源被删/被停用）：留着一个不存在的分组名会让列表恒空，
+      // 而分组芯片上也点不到它，用户只能猜着去点「全部」。
+      // 注意哨兵值是 '全部' 而不是空串 —— visible() 用 `group !== '全部'` 判断不筛选，
+      // 写成空串会变成「按空分组名过滤」，同样恒空。
+      if (this.live.groups.indexOf(this.live.selectedGroup) < 0) {
+        this.live.selectedGroup = '全部';
+      }
       this.live.loadedOnce = true;
     } catch (err) {
+      if (mySeq !== this.liveSeq) {
+        return;
+      }
       this.show(describeError(err as Object));
     } finally {
-      this.live.loading = false;
-      this.bump();
+      if (mySeq === this.liveSeq) {
+        this.live.loading = false;
+        this.bump();
+      }
     }
   }
 
@@ -618,6 +682,11 @@ export class AppModel {
     }
     this.data.sources = this.data.sources.filter((s: VodSource) => s.key !== key);
     this.data.selected = this.data.selected.filter((k: string) => k !== key);
+    // 删源必须同时清掉它名下的历史与收藏：设置页的文案承诺了
+    // 「历史与收藏会一起清掉」，Android 端也是这么做的。留着的话，
+    // 这些条目点开时源已不存在，只会弹「这个源已被停用或删除」。
+    this.data.history = this.data.history.filter((h: HistoryEntry) => h.sourceKey !== key);
+    this.data.favorites = this.data.favorites.filter((f: FavoriteEntry) => f.sourceKey !== key);
     this.data.removedDefaultUrls = removedUrls;
     this.persist();
     this.bump();
@@ -698,6 +767,14 @@ export class AppModel {
     this.importing = true;
     this.bump();
     try {
+      // 重复导入同一个订阅会得到两份一模一样的源：每次都多一轮下载 +
+      // 频道去重白跑，设置页也会出现两条同地址。addLiveSource 已有这个校验。
+      for (let i = 0; i < this.data.liveSources.length; i++) {
+        if (this.data.liveSources[i].url === u) {
+          this.show('这个订阅已经在列表里了');
+          return;
+        }
+      }
       const result = await loadLiveOne({ key: 'import', name: '订阅', url: u, builtin: false }, 40_000);
       if (result.channels.length === 0) {
         const err = result.statuses.length > 0 ? (result.statuses[0].error ?? '没有解析到频道') : '没有解析到频道';
@@ -766,22 +843,31 @@ function collectLiveGroups(channels: LiveChannel[]): string[] {
   return out;
 }
 
+/**
+ * 生成自定义源 key。
+ *
+ * 不能用「找最小空缺号」：删掉 custom_1 之后再添加一个，号又回到 custom_1，
+ * 而历史/收藏里记着 custom_1 的老条目会立刻指到新源上（串台，且用户看到的是
+ * 完全不同的一部剧）。改用时间戳，撞了再加随机后缀 —— 删源之后永不复用。
+ */
 function uniqueKey(existing: string[]): string {
-  let n = 1;
-  const set = new Set<string>(existing);
-  while (set.has(`custom_${n}`)) {
-    n += 1;
+  const taken = new Set<string>(existing);
+  let key = `custom_${Date.now().toString(36)}`;
+  while (taken.has(key)) {
+    key = `custom_${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
   }
-  return `custom_${n}`;
+  return key;
 }
 
+
+/** 同 uniqueKey：直播源的 key 也不能回收，否则直播收藏会指到新源的同名频道上 */
 function uniqueLiveKey(existing: string[]): string {
-  let n = 1;
-  const set = new Set<string>(existing);
-  while (set.has(`custom_live_${n}`)) {
-    n += 1;
+  const taken = new Set<string>(existing);
+  let key = `custom_live_${Date.now().toString(36)}`;
+  while (taken.has(key)) {
+    key = `custom_live_${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
   }
-  return `custom_live_${n}`;
+  return key;
 }
 
 /** 全局单例 */

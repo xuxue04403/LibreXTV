@@ -35,16 +35,22 @@ export async function readDefaultsText(context: common.UIAbilityContext): Promis
   }
 }
 
-/** 解析清单文本，得到两端同构的点播源/直播源与 version */
+/**
+ * 解析清单文本，得到两端同构的点播源/直播源与 version。
+ *
+ * `ok` 区分「读不到/解析失败」和「清单确实为空」：前者绝不能当成正常结果落盘，
+ * 否则 `seeded` 会被标成 true 而源表是空的，之后每次启动都直接
+ * `return data`（`data.seeded && !upgraded`），空源被永久固化 —— 用户只能清应用数据。
+ */
 export function parseDefaults(text: string): DefaultsParsed {
   if (!text || text.trim().length === 0) {
-    return { version: 0, name: DEFAULT_FALLBACK_NAME, vod: [], live: [], liveSelected: [], liveDisabled: [], vodSelected: [], vodDisabled: [] };
+    return { ok: false, version: 0, name: DEFAULT_FALLBACK_NAME, vod: [], live: [], liveSelected: [], liveDisabled: [], vodSelected: [], vodDisabled: [] };
   }
   let file: DefaultsFile;
   try {
     file = JSON.parse(text) as DefaultsFile;
   } catch (err) {
-    return { version: 0, name: DEFAULT_FALLBACK_NAME, vod: [], live: [], liveSelected: [], liveDisabled: [], vodSelected: [], vodDisabled: [] };
+    return { ok: false, version: 0, name: DEFAULT_FALLBACK_NAME, vod: [], live: [], liveSelected: [], liveDisabled: [], vodSelected: [], vodDisabled: [] };
   }
   const vod: VodSource[] = [];
   const vodSelected: string[] = [];
@@ -98,6 +104,7 @@ export function parseDefaults(text: string): DefaultsParsed {
     }
   }
   return {
+    ok: true,
     version: typeof file.version === 'number' ? file.version : 0,
     name: file.name ?? DEFAULT_FALLBACK_NAME,
     vod: vod,
@@ -120,6 +127,12 @@ export function parseDefaults(text: string): DefaultsParsed {
  * - 版本没变：原样返回，用户删掉的就是删掉。
  */
 export function mergeDefaults(data: AppData, parsed: DefaultsParsed): AppData {
+  // 清单读不到（rawfile 缺失/损坏/解码失败）：原样返回，绝不标 seeded。
+  // 否则全新安装会被固化成「零源」状态，且因为 defaultsVersion 相等，
+  // 之后每次启动都直接返回，用户再也没机会拿到内置源。
+  if (parsed.ok !== true) {
+    return data;
+  }
   const upgraded = data.defaultsVersion < parsed.version;
   if (data.seeded && !upgraded) {
     return data;
@@ -273,6 +286,12 @@ export function mergeDefaults(data: AppData, parsed: DefaultsParsed): AppData {
     }
   }
 
+  // 清单解析成功但一条源都没有（打包事故）：同样不能标 seeded，
+  // 否则和「读不到」一样会被永久固化。下次启动还会再试一次。
+  if (!data.seeded && sources.length === 0 && liveSources.length === 0) {
+    return data;
+  }
+
   return {
     sources: sources,
     selected: selected,
@@ -289,6 +308,8 @@ export function mergeDefaults(data: AppData, parsed: DefaultsParsed): AppData {
 }
 
 export interface DefaultsParsed {
+  /** false = 清单读不到或解析失败；这种结果不能落盘（见 parseDefaults 注释） */
+  ok: boolean;
   version: number;
   name: string;
   vod: VodSource[];
