@@ -13,6 +13,8 @@ export interface VodSource {
   detail?: string;
   isAdult: boolean;
   builtin: boolean;
+  /** 内置源「默认不启用」的原因（如「大陆直连不通」），设置页解释给用户看 */
+  note?: string;
 }
 
 /** 直播源（M3U 播放列表） */
@@ -150,6 +152,8 @@ export interface DefaultsEntryVod {
   url: string;
   detail?: string;
   isAdult?: boolean;
+  selected?: boolean;
+  note?: string;
 }
 
 export interface DefaultsEntryLive {

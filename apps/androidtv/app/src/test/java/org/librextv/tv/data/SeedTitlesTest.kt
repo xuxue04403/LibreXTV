@@ -78,4 +78,29 @@ class SeedTitlesTest {
         val fixed = names.map { "$SEED_SOURCE_KEY:$it" }
         assertEquals(names.size, fixed.distinct().size)
     }
+
+    @Test
+    fun `每日增量合并会去重并返回真实新增条数`() {
+        val before = SeedTitles.size
+        // 两条新片 + 一条已有 + 一条空白：只应新增 2 条
+        val added = SeedTitles.merge(listOf("新生片名甲", "新生片名乙", "亮剑", "   "))
+        assertEquals(2, added)
+        assertEquals(before + 2, SeedTitles.size)
+        // 重复合并同一批不应再涨：否则每日增量跑几次就把内存表撑爆
+        assertEquals(0, SeedTitles.merge(listOf("新生片名甲", "新生片名乙")))
+        assertEquals(before + 2, SeedTitles.size)
+    }
+
+    @Test
+    fun `增量里的新片名要能被中文包含匹配到`() {
+        SeedTitles.merge(listOf("测试用新剧第一季"))
+        assertEquals(listOf("测试用新剧第一季"), SeedTitles.containsRaw("测试用新剧"))
+    }
+
+    @Test
+    fun `未就绪时合并是安全的空操作`() {
+        SeedTitles.clearForTest()
+        assertEquals(0, SeedTitles.merge(listOf("随便一条")))
+        assertFalse(SeedTitles.ready)
+    }
 }

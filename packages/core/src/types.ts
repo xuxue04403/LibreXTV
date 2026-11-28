@@ -16,6 +16,13 @@ export interface SourceConfig {
   /** 可选：详情页根地址（部分源需要爬详情页提取 m3u8） */
   detail?: string;
   isAdult?: boolean;
+  /**
+   * 可选：内置源「默认不启用」的原因（例如「大陆直连不通」）。
+   *
+   * 只有来源是内置清单的 `note` 字段时才填，自定义源不填。设置页用它解释
+   * 「这个源为什么默认是关的」，否则用户会以为源坏了。
+   */
+  note?: string;
 }
 
 export interface SearchResultItem {

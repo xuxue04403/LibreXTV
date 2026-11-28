@@ -3,7 +3,7 @@ package org.librextv.tv.data
 import android.content.Context
 import android.util.Log
 import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.File
 import kotlin.concurrent.thread
 
 /**
@@ -52,6 +52,10 @@ object SeedTitles {
     @Volatile
     private var all: List<String> = emptyList()
 
+    /** 去重用的片名集合，与 [all] 同步维护 */
+    @Volatile
+    private var nameSet: Set<String> = emptySet()
+
     @Volatile
     var ready: Boolean = false
         private set
@@ -66,57 +70,153 @@ object SeedTitles {
     var keys: Int = 0
         private set
 
+    /**
+     * 这批片名是从哪来的：`内置` 表示 APK 资产，`在线更新` 表示覆盖成了 OTA 版本。
+     * 只用于设置页展示，用户想知道「我看到的片名有多新」。
+     */
+    @Volatile
+    var origin: String = "内置"
+        private set
+
     val size: Int get() = all.size
 
+    /** 全部片名的快照（在线更新/增量落盘时写文件用） */
+    fun allNames(): List<String> = all
+
     /**
-     * 后台线程加载 `assets/seed-titles.txt`。
+     * 用户目录里缓存的「在线更新版」种子表。
      *
-     * 重复调用安全（已加载直接返回）。文件缺失时保持「未就绪」，
-     * 搜索退化成只用用户扫过的本地索引——也就是 v1.3.14 的行为，不会崩。
+     * APK 里的那份是**发版快照**，新片不会自动进来。启动后如果拉到更新的版本，
+     * 就写到这个文件，下次启动优先读它——不然每次冷启动都要重新下 1.9MB。
+     */
+    private fun cachedFile(context: Context) = File(context.filesDir, "seed-titles.txt")
+
+    /**
+     * 后台线程加载种子表。
+     *
+     * 优先读用户目录里的在线更新版，没有再读 APK 资产。重复调用安全（已加载直接返回）。
+     * 文件缺失时保持「未就绪」，搜索退化成只用用户扫过的本地索引——也就是 v1.3.14
+     * 的行为，不会崩。
      */
     fun install(context: Context, onLoaded: (() -> Unit)? = null) {
         if (ready) return
         thread(name = "seed-titles-load", isDaemon = true) {
             val started = System.currentTimeMillis()
-            runCatching { load(context.applicationContext) }
+            val app = context.applicationContext
+            val cached = cachedFile(app)
+            val fromCache = cached.isFile && cached.length() > 0
+            runCatching {
+                if (fromCache) {
+                    cached.bufferedReader(Charsets.UTF_8).use { loadFrom(it) }
+                    origin = "在线更新"
+                } else {
+                    app.assets.open(SEED_ASSET).bufferedReader(Charsets.UTF_8).use { loadFrom(it) }
+                    origin = "内置"
+                }
+            }
                 .onSuccess {
                     loadMs = System.currentTimeMillis() - started
                     ready = true
-                    Log.i(TAG, "种子表就绪：${size} 个片名 / $keys 个键，耗时 ${loadMs}ms")
+                    Log.i(TAG, "种子表就绪（$origin）：${size} 个片名 / $keys 个键，耗时 ${loadMs}ms")
                     onLoaded?.invoke()
                 }
                 .onFailure {
-                    // 不静默：这是「拼音搜索有没有东西」的唯一来源，吞掉异常等于让用户
-                    // 面对一个永远 0 条的搜索框，却查不到原因。
-                    Log.e(TAG, "种子表加载失败", it)
+                    if (fromCache) {
+                        // 在线更新版可能下了一半就断电，坏文件不能把搜索彻底废掉：
+                        // 删掉它，回落到 APK 内置那份。
+                        Log.w(TAG, "在线种子表损坏，回落到内置版本", it)
+                        runCatching { cached.delete() }
+                        runCatching {
+                            app.assets.open(SEED_ASSET).bufferedReader(Charsets.UTF_8).use { loadFrom(it) }
+                            origin = "内置"
+                        }.onSuccess {
+                            loadMs = System.currentTimeMillis() - started
+                            ready = true
+                            onLoaded?.invoke()
+                        }.onFailure { e -> Log.e(TAG, "内置种子表也加载失败", e) }
+                    } else {
+                        // 不静默：这是「拼音搜索有没有东西」的唯一来源，吞掉异常等于让用户
+                        // 面对一个永远 0 条的搜索框，却查不到原因。
+                        Log.e(TAG, "种子表加载失败", it)
+                    }
                 }
         }
     }
 
-    private fun load(context: Context) {
-        // 注意：资源名是 `.txt` 而不是 `.txt.gz`。
-        // aapt2 打包时会自动解压 `.gz` 并去掉该扩展名（APK 里存的是明文 3.8MB，
-        // 由 zip 自身再压缩），所以这里按明文读，不能套 GZIPInputStream。
+    private fun loadFrom(reader: BufferedReader) {
         val map = HashMap<String, MutableList<String>>(1 shl 17)
-        val plain = ArrayList<String>(170_000)
+        val plain = ArrayList<String>(240_000)
+        val seen = HashSet<String>(240_000)
 
-        context.assets.open(SEED_ASSET).bufferedReader(Charsets.UTF_8).use { reader ->
-            var line = reader.readLine()
-            while (line != null) {
-                val name = line.trim()
-                if (name.isNotEmpty()) {
-                    plain.add(name)
-                    for (key in keysOf(name)) {
-                        map.getOrPut(key) { ArrayList(8) }.add(name)
-                    }
+        var line = reader.readLine()
+        while (line != null) {
+            val name = line.trim()
+            if (name.isNotEmpty() && seen.add(name)) {
+                plain.add(name)
+                for (key in keysOf(name)) {
+                    map.getOrPut(key) { ArrayList(8) }.add(name)
                 }
-                line = reader.readLine()
             }
+            line = reader.readLine()
         }
 
         byInitials = map
         all = plain
+        nameSet = seen
         keys = map.size
+    }
+
+    /**
+     * 把每日增量得到的片名并进当前表（去重，已存在的不重复加）。
+     *
+     * @return 真正新增的条数
+     */
+    fun merge(names: Collection<String>): Int {
+        if (!ready) return 0
+        val added = ArrayList<String>()
+        val seen = HashSet(nameSet)
+        for (raw in names) {
+            val name = raw.trim()
+            if (name.isEmpty() || !seen.add(name)) continue
+            added.add(name)
+        }
+        if (added.isEmpty()) return 0
+        val map = HashMap(byInitials)
+        // 倒排表里存的是不可变 List，逐键复制一次代价可控：
+        // 单日增量几十条、涉及的键也就几十个。
+        for (name in added) {
+            for (key in keysOf(name)) {
+                val old = map[key]
+                map[key] = if (old == null) listOf(name) else old + name
+            }
+        }
+        byInitials = map
+        all = all + added
+        nameSet = seen
+        keys = map.size
+        return added.size
+    }
+
+    /**
+     * 把在线更新下来的整份片名表写进用户目录，供下次启动读取。
+     *
+     * 先写临时文件再改名：中途断电不会留下半截文件把搜索废掉。
+     */
+    fun cacheForNextLaunch(context: Context, names: List<String>): Boolean {
+        if (names.isEmpty()) return false
+        return runCatching {
+            val target = cachedFile(context.applicationContext)
+            val tmp = File(target.parentFile, "${target.name}.tmp")
+            tmp.bufferedWriter(Charsets.UTF_8).use { w ->
+                for (name in names) {
+                    w.write(name)
+                    w.write("\n")
+                }
+            }
+            if (target.exists() && !target.delete()) throw IllegalStateException("删不掉旧种子表")
+            if (!tmp.renameTo(target)) throw IllegalStateException("改名失败")
+            true
+        }.onFailure { Log.w(TAG, "缓存在线种子表失败", it) }.getOrDefault(false)
     }
 
     /**
@@ -174,14 +274,19 @@ object SeedTitles {
         }
         byInitials = map
         all = plain
+        nameSet = plain.toHashSet()
         ready = true
+        origin = "内置"
     }
 
     @androidx.annotation.VisibleForTesting
     fun clearForTest() {
         byInitials = emptyMap()
         all = emptyList()
+        nameSet = emptySet()
         ready = false
         loadMs = 0
+        keys = 0
+        origin = "内置"
     }
 }

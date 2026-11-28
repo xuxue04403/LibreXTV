@@ -35,7 +35,9 @@ const MAX_KEY_LEN = 12;
 
 let byInitials: Map<string, string[]> | null = null;
 let all: string[] = [];
+let nameSet: Set<string> = new Set();
 let loading: Promise<void> | null = null;
+let origin = '内置';
 
 function assetPath(): string | null {
   // 三个入口都要能找到：
@@ -60,25 +62,19 @@ function assetPath(): string | null {
 }
 
 /**
- * 同步加载（数据是本地文件，主进程启动时读一次即可）。
+ * 从一份纯文本片名表建倒排索引（覆盖式）。
  *
- * 文件缺失时保持「未就绪」，建议退化成只用 `title-index`——也就是老行为，不会崩。
+ * 抽出来是因为「APK/仓库内置的那份」和「OTA 下来的那份」格式完全一样，
+ * 只是来源不同，没必要写两套。
  */
-export function loadSeedTitles(): void {
-  if (byInitials) return;
-  const path = assetPath();
-  if (!path) return;
-  let raw: string;
-  try {
-    raw = gunzipSync(readFileSync(path)).toString('utf8');
-  } catch {
-    return;
-  }
+function buildIndex(raw: string): void {
   const map = new Map<string, string[]>();
   const plain: string[] = [];
+  const seen = new Set<string>();
   for (const line of raw.split('\n')) {
     const name = line.trim();
-    if (!name) continue;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
     plain.push(name);
     const initials = pinyinInitials(name);
     if (initials.length < 2) continue;
@@ -92,13 +88,92 @@ export function loadSeedTitles(): void {
   }
   byInitials = map;
   all = plain;
+  nameSet = seen;
+}
+
+/**
+ * 同步加载（数据是本地文件，主进程启动时读一次即可）。
+ *
+ * 文件缺失时保持「未就绪」，建议退化成只用 `title-index`——也就是老行为，不会崩。
+ *
+ * @param cachePath 可选：用户目录里的「在线更新版」明文表。存在就优先读它，
+ *   这样下次冷启动不必重新下 1.9MB。
+ */
+export function loadSeedTitles(cachePath?: string | null): void {
+  if (byInitials) return;
+  if (cachePath) {
+    try {
+      if (statSync(cachePath).isFile()) {
+        buildIndex(readFileSync(cachePath).toString('utf8'));
+        origin = '在线更新';
+        return;
+      }
+    } catch {
+      // 坏文件就忽略，回落到仓库/APK 内置那份
+    }
+  }
+  const path = assetPath();
+  if (!path) return;
+  let raw: string;
+  try {
+    raw = gunzipSync(readFileSync(path)).toString('utf8');
+  } catch {
+    return;
+  }
+  buildIndex(raw);
+  origin = '内置';
 }
 
 /** 后台加载一遍（幂等），供主进程启动时预热 */
-export function primeSeedTitles(): Promise<void> {
+export function primeSeedTitles(cachePath?: string | null): Promise<void> {
   if (byInitials) return Promise.resolve();
-  if (!loading) loading = Promise.resolve().then(loadSeedTitles);
+  if (!loading) loading = Promise.resolve().then(() => loadSeedTitles(cachePath));
   return loading;
+}
+
+/**
+ * 把一批片名并进当前表（去重）。
+ *
+ * @returns 真正新增的条数
+ */
+export function mergeSeed(names: readonly string[]): number {
+  if (!byInitials) return 0;
+  const added: string[] = [];
+  for (const raw of names) {
+    const name = raw.trim();
+    if (!name) continue;
+    // 注意：这里必须显式 has/add 两步，不能写成 `!nameSet.add(name)`。
+    // JS 的 `Set.add()` 返回 Set 本身（永远真值），写成取反永远不成立，
+    // 去重会静默失效——表现是每日增量每跑一次，同一个片名就多一份。
+    if (nameSet.has(name)) continue;
+    nameSet.add(name);
+    added.push(name);
+  }
+  if (added.length === 0) return 0;
+  const map = byInitials;
+  for (const name of added) {
+    const initials = pinyinInitials(name);
+    if (initials.length < 2) continue;
+    const limit = Math.min(initials.length, MAX_KEY_LEN);
+    for (let i = 1; i <= limit; i += 1) {
+      const key = initials.slice(0, i);
+      const bucket = map.get(key);
+      if (bucket) bucket.push(name);
+      else map.set(key, [name]);
+    }
+  }
+  all = all.concat(added);
+  return added.length;
+}
+
+/** 全部片名的快照（OTA/增量落盘时写文件用） */
+export function seedNames(): readonly string[] {
+  return all;
+}
+
+/** 这批片名的来源：`内置` 或 `在线更新` */
+export function seedOrigin(): string {
+  return origin;
 }
 
 export function seedReady(): boolean {
@@ -150,10 +225,14 @@ export function installSeedForTest(names: readonly string[]): void {
   }
   byInitials = map;
   all = [...names];
+  nameSet = new Set(names);
+  origin = '内置';
 }
 
 export function clearSeedForTest(): void {
   byInitials = null;
   all = [];
+  nameSet = new Set();
   loading = null;
+  origin = '内置';
 }

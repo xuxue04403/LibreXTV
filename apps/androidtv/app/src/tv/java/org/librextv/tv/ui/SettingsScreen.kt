@@ -110,7 +110,17 @@ fun SettingsScreen(vm: AppViewModel, data: AppData) {
         data.sources.forEach { source ->
             SourceRow(
                 name = source.name,
-                subtitle = source.url + if (source.builtin) "  ·  内置" else "",
+                subtitle = buildString {
+                    append(source.url)
+                    if (source.builtin) append("  ·  内置")
+                    // 默认关掉的内置源要说明原因，否则用户以为它坏了。
+                    // 这是 v10 清单里写死的 note（大陆不通 / 搜索被 Cloudflare 挡）。
+                    val note = source.note
+                    if (!source.key.let { it in data.selected } && !note.isNullOrEmpty()) {
+                        append("  ·  ")
+                        append(note)
+                    }
+                },
                 enabled = source.key in data.selected,
                 onToggle = { vm.toggleSource(source.key) },
                 onDelete = {
@@ -199,6 +209,29 @@ fun SettingsScreen(vm: AppViewModel, data: AppData) {
             }
         }
 
+        SectionHeader("拼音检索库", "按首字母找片的本地片名库")
+        PanelBox {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    if (vm.seedSize > 0) {
+                        "${vm.seedOrigin} · ${vm.seedSize} 个片名"
+                    } else {
+                        "尚未就绪（敲首字母时只会用本地扫过的片名）"
+                    },
+                    color = if (vm.seedSize > 0) TextPrimary else TextMuted,
+                    fontSize = MaterialTheme.typography.bodySmall.fontSize,
+                )
+                Text(
+                    "启动后在 Wi-Fi 下静默拉一次当天新片；想立刻补上最新片名，可以点下面的重建。",
+                    color = TextMuted,
+                    fontSize = MaterialTheme.typography.bodySmall.fontSize,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TvButton("重建检索库", onClick = { vm.rebuildSeedLibrary() })
+                }
+            }
+        }
+
         SectionHeader("播放设置")
         PanelBox {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -222,6 +255,12 @@ fun SettingsScreen(vm: AppViewModel, data: AppData) {
                     "跳过采集站插在播放列表里的中插广告段；片源自带的贴片无法去掉",
                     data.settings.adFilter,
                 ) { vm.updateSettings { s -> s.copy(adFilter = !s.adFilter) } }
+                SettingToggle(
+                    "移动网络下更新检索库",
+                    "默认只在 Wi-Fi 下更新（整表约 1.9MB、每天增量几十 KB）；" +
+                        "用 4G 电视盒子的话打开这个开关",
+                    data.settings.seedOnCellular,
+                ) { vm.updateSettings { s -> s.copy(seedOnCellular = !s.seedOnCellular) } }
             }
         }
 

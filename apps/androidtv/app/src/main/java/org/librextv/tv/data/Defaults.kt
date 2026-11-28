@@ -39,6 +39,7 @@ object Defaults {
                 url = url,
                 detail = obj.str("detail"),
                 builtin = true,
+                note = obj.str("note"),
             )
         }.orEmpty()
 
@@ -102,6 +103,54 @@ object Defaults {
     private fun assetText(context: Context): String = runCatching {
         context.assets.open("default-sources.json").bufferedReader().use { it.readText() }
     }.getOrNull() ?: ""
+
+    /**
+     * 新装用户默认启用的内置点播源 key。
+     *
+     * 全 17 个源按「列表 + 搜索」两个端点实测过：9 个在大陆直连两项都通，其余 8 个
+     * 不通——5 个连不上（量子、电影天堂、如意、暴风、新浪，DNS 被污染、绕过污染后
+     * 服务端仍拒绝），3 个搜索被 Cloudflare 挑战页挡住（极速、金鹰、光速，返回
+     * HTTP 403 的「Just a moment...」）。这些源开着只会让每次搜索白等满超时，或者
+     * 在分类页看得到、一搜就 403。清单里用 `"selected": false` 标出来：源照样进
+     * 列表、保留原下标（避免老用户 `builtin_N` 指向别的站），只是默认不勾选。
+     */
+    fun defaultVodSelectedKeysFrom(text: String): Set<String> {
+        val root = runCatching { LooseJson.parseToJsonElement(text).jsonObject }.getOrNull() ?: return emptySet()
+        val array = root["sources"] as? JsonArray ?: return emptySet()
+        return array.mapIndexedNotNull { index, element ->
+            val obj = element as? JsonObject ?: return@mapIndexedNotNull null
+            // 只有明确写了 selected:false 的才关掉，缺省仍然是启用
+            if (obj["selected"]?.toString()?.trim()?.trim('"') == "false") return@mapIndexedNotNull null
+            "builtin_$index"
+        }.toSet()
+    }
+
+    /** 清单里明确标了 `selected: false` 的内置点播源 key */
+    fun defaultVodDisabledKeysFrom(text: String): Set<String> {
+        val root = runCatching { LooseJson.parseToJsonElement(text).jsonObject }.getOrNull() ?: return emptySet()
+        val array = root["sources"] as? JsonArray ?: return emptySet()
+        return array.mapIndexedNotNull { index, element ->
+            val obj = element as? JsonObject ?: return@mapIndexedNotNull null
+            if (obj["selected"]?.toString()?.trim()?.trim('"') != "false") return@mapIndexedNotNull null
+            "builtin_$index"
+        }.toSet()
+    }
+
+    fun defaultVodSelectedKeys(context: Context): Set<String> =
+        defaultVodSelectedKeysFrom(assetText(context))
+
+    fun defaultVodDisabledKeys(context: Context): Set<String> =
+        defaultVodDisabledKeysFrom(assetText(context))
+
+    /**
+     * 从哪个清单版本开始「只默认启用大陆直连可用的点播源」。
+     *
+     * 与 [LIVE_SELECTION_VERSION] 同理：v9 及以前老用户 17 个源全是勾着的，只改
+     * `selected` 对他们没效果（勾选状态早就存进 `selected` 了），所以升级到 v10
+     * 时把清单里明确标了 `selected:false` 的那些取消勾选一次。只做这一次：用户之后
+     * 手动打开的，不会在下次升级时又被关掉。
+     */
+    const val VOD_SELECTION_VERSION = 10
 
     /**
      * 从哪个清单版本开始「只默认启用健康源」。

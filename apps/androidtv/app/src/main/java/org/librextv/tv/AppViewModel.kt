@@ -42,6 +42,8 @@ import org.librextv.tv.data.PlaybackCandidate
 import org.librextv.tv.data.Repository
 import org.librextv.tv.data.SearchGroup
 import org.librextv.tv.data.SearchItem
+import org.librextv.tv.data.SeedTitles
+import org.librextv.tv.data.SeedUpdater
 import org.librextv.tv.data.SourceOutcome
 import org.librextv.tv.data.VodDetail
 import org.librextv.tv.data.VodSource
@@ -248,6 +250,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 拼音索引预热的后台任务，用户一旦开始检索就取消 */
     private var warmJob: Job? = null
 
+    /** 种子表在线更新 + 每日增量；与 warmJob 分开，用户搜索时不必取消它 */
+    private var seedUpdateJob: Job? = null
+
+    /** 种子表的来源与条数，设置页展示「拼音库有多大、是不是在线更新过的」 */
+    var seedOrigin by mutableStateOf(SeedTitles.origin)
+        private set
+    var seedSize by mutableStateOf(SeedTitles.size)
+        private set
+
+    /** 正在重建检索库（设置页按钮置灰用） */
+    var seedRebuilding by mutableStateOf(false)
+        private set
+
     /** 「继续观看 / 收藏」起播的详情请求：同一时刻只允许一个在飞，避免连点叠请求。 */
     private var openingJob: Job? = null
 
@@ -336,6 +351,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val added = runCatching { repo.warmPinyinIndex(sources) }.getOrDefault(0)
             if (added > 0) runCatching { persistPinyinIndex() }
         }
+        // 种子表在线更新 + 每日增量（方案 C）。
+        // 顺序有讲究：先整表 OTA（若远端更新），再拉当天新片——OTA 里本来就含了
+        // 截至打包那天的全部片名，增量只补「打包之后」的，两者不冲突。
+        // 都在 Wi-Fi 下才跑（见 SeedUpdater / Network），失败静默可恢复。
+        seedUpdateJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(3_000) // 让首帧与首页目录先跑，别抢带宽
+            // 种子表可能还在后台线程加载，等它就绪再合并，否则 merge 会把数据丢掉
+            var waited = 0
+            while (!SeedTitles.ready && waited < 20_000) {
+                kotlinx.coroutines.delay(300)
+                waited += 300
+            }
+            if (!SeedTitles.ready) return@launch
+            val allowCellular = _data.value.settings.seedOnCellular
+            runCatching { SeedUpdater.updateTableIfNeeded(getApplication(), allowCellular) }
+            val sources = _data.value.activeSources()
+            runCatching { SeedUpdater.pullDailyDelta(getApplication(), sources, allowCellular) }
+            seedOrigin = SeedTitles.origin
+            seedSize = SeedTitles.size
+        }
         // 目录缓存：先把上次落盘的内容装进 repo，界面一开机就有内容可读
         viewModelScope.launch {
             runCatching { installCatalogCache() }
@@ -347,6 +382,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 runCatching { refreshCatalog() }
                 kotlinx.coroutines.delay(org.librextv.tv.data.CatalogSnapshot.REFRESH_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * 手动重建/更新检索库（设置页按钮）。
+     *
+     * 自动更新只在启动时跑一次，用户刚看完新剧想立刻搜到，就得有手动入口。
+     * 与自动流程同一套逻辑，只是不再等 `delay`。
+     */
+    fun rebuildSeedLibrary() {
+        if (seedRebuilding) return
+        seedRebuilding = true
+        viewModelScope.launch {
+            try {
+                val sources = _data.value.activeSources()
+                val allowCellular = _data.value.settings.seedOnCellular
+                // 先 OTA（若远端有大版本），再拉当天增量
+                runCatching { SeedUpdater.updateTableIfNeeded(getApplication(), allowCellular) }
+                runCatching { SeedUpdater.pullDailyDelta(getApplication(), sources, allowCellular) }
+            } finally {
+                seedOrigin = SeedTitles.origin
+                seedSize = SeedTitles.size
+                seedRebuilding = false
             }
         }
     }
@@ -467,6 +526,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 current.liveSelected
             }
+        // 点播源同理：v10 起把大陆直连不通的 8 个源默认关掉（5 个连不上、3 个搜索
+        // 被 Cloudflare 挡）。新装用户只勾清单里没标 selected:false 的；老用户升级到
+        // v10 时一次性取消勾选，之后用户自己再打开不会被关掉。
+        val defaultVodSelected = Defaults.defaultVodSelectedKeys(getApplication())
+        val vodDisabled = Defaults.defaultVodDisabledKeys(getApplication())
+        val vodBase =
+            if (current.defaultsVersion < Defaults.VOD_SELECTION_VERSION) {
+                current.selected.filterNot { it in vodDisabled }
+            } else {
+                current.selected
+            }
         store.update {
             // 内置源**换了地址**（同 key、不同 url）时用新地址替换旧条目：
             // key 是按下标生成的，光按 url 判重会让列表里出现两条同 key 的同名源
@@ -477,15 +547,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 local != null && local.url != d.url && local.url !in removed
             }.associateBy { s -> s.key }
             val mergedVod = it.sources.map { s -> freshVodByKey[s.key] ?: s }
-            val addedVodKeys = addedVod
-                .filter { s -> it.sources.none { old -> old.key == s.key } }
-                .map { s -> s.key }
             val freshByKey = addedLive.associateBy { s -> s.key }
             val mergedLive = it.liveSources.map { s -> freshByKey[s.key] ?: s } +
                 addedLive.filter { s -> it.liveSources.none { old -> old.key == s.key } }
+            // addedVod 里既有健康源也有被墙源，只有清单标了默认启用的才勾上；
+            // vodBase 已经处理过「老用户升级时取消勾选」那一次。
+            val selectedVodKeys = addedVod
+                .filter { s -> it.sources.none { old -> old.key == s.key } && s.key in defaultVodSelected }
+                .map { s -> s.key }
             it.copy(
                 sources = (mergedVod + addedVod).distinctBy { s -> s.url },
-                selected = (it.selected + addedVodKeys).distinct(),
+                selected = (vodBase + selectedVodKeys).distinct(),
                 liveSources = mergedLive.distinctBy { s -> s.url },
                 liveSelected = (
                     liveBase + addedLive.filter { s -> s.key in defaultLiveSelected }.map { s -> s.key }

@@ -5,6 +5,7 @@ import {
   containsSeed,
   installSeedForTest,
   lookupSeed,
+  mergeSeed,
   seedReady,
   seedSize,
 } from './seed-titles';
@@ -62,5 +63,28 @@ describe('seed-titles', () => {
     expect(lookupSeed('2024')).toEqual(['2024春节联欢晚会']);
     // 纯符号算不出首字母，不进前缀表；但按中文/原文字符串包含仍能找到
     expect(containsSeed('★')).toEqual(['★★★★★']);
+  });
+
+  it('每日增量合并去重，并返回真实新增条数', () => {
+    installSeedForTest(['亮剑', '斗罗大陆']);
+    // 两条新的 + 一条已有的 + 一条空白：只应新增 2 条
+    expect(mergeSeed(['新生片名甲', '新生片名乙', '亮剑', '   '])).toBe(2);
+    expect(seedSize()).toBe(4);
+    // 同一批再合一次不应再涨：每日增量跑几次不能把内存表撑爆
+    expect(mergeSeed(['新生片名甲', '新生片名乙'])).toBe(0);
+    expect(seedSize()).toBe(4);
+  });
+
+  it('增量里的新片名能被拼音前缀和中文包含两条路找到', () => {
+    installSeedForTest(['亮剑']);
+    mergeSeed(['庆余年第三季']);
+    expect(lookupSeed('qyn')).toEqual(['庆余年第三季']);
+    expect(containsSeed('庆余年')).toEqual(['庆余年第三季']);
+  });
+
+  it('未就绪时合并是安全的空操作', () => {
+    clearSeedForTest();
+    expect(mergeSeed(['随便一条'])).toBe(0);
+    expect(seedReady()).toBe(false);
   });
 });

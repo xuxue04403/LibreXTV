@@ -25,8 +25,8 @@ android {
         applicationId = "org.librextv.tv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.3.15"
+        versionCode = 25
+        versionName = "1.3.16"
     }
 
     /**

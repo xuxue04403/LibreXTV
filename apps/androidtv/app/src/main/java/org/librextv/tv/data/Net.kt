@@ -215,6 +215,25 @@ object Net {
         }
     }
 
+    /**
+     * 只取响应头里的 ETag（不下载正文）。
+     *
+     * 用于「远端文件变了没有」的廉价判断：种子表 1.9MB，每次启动都重下太浪费，
+     * 而 jsDelivr 的 ETag 是按文件内容算的，内容一变它就变。
+     */
+    suspend fun headEtag(url: String): String? = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", UA)
+            .head()
+            .build()
+        runCatching {
+            client.newCall(request).await().use { response ->
+                if (!response.isSuccessful) null else response.header("ETag")
+            }
+        }.getOrNull()
+    }
+
     /** 流式读取（直播/EPG 用），调用方负责关闭 */
     suspend fun stream(url: String): InputStream = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(url).header("User-Agent", UA).build()

@@ -68,12 +68,33 @@ export async function seedLookup(needle: string, limit = 200): Promise<string[]>
 }
 
 /** 内置片库是否已就绪（诊断用） */
-export async function seedInfo(): Promise<{ ready: boolean; size: number }> {
-  if (!window.librextv) return { ready: false, size: 0 };
+export async function seedInfo(): Promise<{
+  ready: boolean;
+  size: number;
+  origin: string;
+  version: number;
+}> {
+  if (!window.librextv) return { ready: false, size: 0, origin: '', version: 0 };
   try {
     return await window.librextv.seedInfo();
   } catch {
-    return { ready: false, size: 0 };
+    return { ready: false, size: 0, origin: '', version: 0 };
+  }
+}
+
+/**
+ * 让主进程拉一次「每日增量」：各启用源的第 1 页就是当天新片。
+ *
+ * 只上报 URL，不上报源名——主进程只拿它拼 `?ac=list&pg=1`，不需要别的字段。
+ * 失败不影响任何界面，返回新增条数（多数时候是 0，因为当天本来就没几部新片）。
+ */
+export async function seedPullDelta(urls: string[]): Promise<number> {
+  if (!window.librextv || urls.length === 0) return 0;
+  try {
+    const res = await window.librextv.seedPullDelta(urls);
+    return res.ok ? res.added : 0;
+  } catch {
+    return 0;
   }
 }
 

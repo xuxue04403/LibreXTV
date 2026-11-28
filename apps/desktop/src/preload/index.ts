@@ -125,7 +125,11 @@ const bridge = {
    */
   seedLookup: (needle: string, limit?: number): Promise<{ ok: boolean; names: string[] }> =>
     ipcRenderer.invoke('seed:lookup', needle, limit),
-  seedInfo: (): Promise<{ ready: boolean; size: number }> => ipcRenderer.invoke('seed:info'),
+  seedInfo: (): Promise<{ ready: boolean; size: number; origin: string; version: number }> =>
+    ipcRenderer.invoke('seed:info'),
+  /** 上报当前启用的点播源，让主进程拉一次每日增量 */
+  seedPullDelta: (urls: string[]): Promise<{ ok: boolean; added: number }> =>
+    ipcRenderer.invoke('seed:pull-delta', urls.map((url) => ({ url }))),
   toggleFullscreen: (): Promise<boolean> => ipcRenderer.invoke('window:toggle-fullscreen'),
   setFullscreen: (value: boolean): Promise<boolean> => ipcRenderer.invoke('window:set-fullscreen', value),
   isFullscreen: (): Promise<boolean> => ipcRenderer.invoke('window:is-fullscreen'),

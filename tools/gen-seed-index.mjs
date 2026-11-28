@@ -245,11 +245,27 @@ async function main() {
   const coreDir = resolve(ROOT, 'packages/core/src');
   await writeFile(resolve(coreDir, 'seed-titles.txt.gz'), gz);
 
+  // OTA 版本号：客户端启动后先取这个几百字节的小文件比对，有新版才下 1.9MB 整表。
+  // 用「打包日期」而不是自增计数——爬取是按天做的，日期天然单调，也不用额外状态。
+  // 注意：这个值和 seed-titles.txt.gz 必须同批提交，否则客户端会拉到版本号已更新、
+  // 内容还是旧的（jsDelivr 按 commit 缓存，同一条 commit 里两个文件一起换，不会错配）。
+  const version = todayStamp();
+  await writeFile(resolve(assetDir, 'seed-version.txt'), `${version}\n`, 'utf8');
+  await writeFile(resolve(coreDir, 'seed-version.txt'), `${version}\n`, 'utf8');
+
   log('---');
   log(`唯一片名 ${list.length}`);
   log(`纯文本 ${(raw.length / 1048576).toFixed(2)} MB → gzip ${(gz.length / 1048576).toFixed(2)} MB`);
+  log(`OTA 版本号 ${version}`);
   log(`已写入 apps/androidtv/app/src/main/assets/seed-titles.txt.gz`);
   log(`已写入 packages/core/src/seed-titles.txt.gz`);
+}
+
+/** `yyyyMMdd` 形式的版本号（本地时区） */
+function todayStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return Number(`${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`);
 }
 
 await main();

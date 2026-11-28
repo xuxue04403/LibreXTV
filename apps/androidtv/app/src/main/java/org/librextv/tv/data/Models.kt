@@ -12,6 +12,8 @@ data class VodSource(
     val isAdult: Boolean = false,
     /** 是否为内置默认源（内置源可在设置里一键恢复） */
     val builtin: Boolean = false,
+    /** 内置源的补充说明（例如「默认不启用」的原因），设置页显示给用户看 */
+    val note: String? = null,
 )
 
 /** 直播源：M3U 订阅 */
@@ -178,6 +180,13 @@ data class AppSettings(
     val resumePlayback: Boolean = true,
     /** 移除播放列表里的中插广告分组（桌面端同一开关语义） */
     val adFilter: Boolean = true,
+    /**
+     * 允许在移动网络（4G/5G）下更新拼音库。
+     *
+     * 默认关：整表 1.9MB + 每天几十 KB 增量，走蜂窝流量对不少用户是真金白银。
+     * 但确实有只用 4G 电视盒子的用户（没有 Wi-Fi），所以给个开关而不是硬编码。
+     */
+    val seedOnCellular: Boolean = false,
 )
 
 @Serializable

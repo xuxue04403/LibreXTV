@@ -53,12 +53,31 @@ async function main() {
     await writeFile(target, gz);
   }
 
+  // OTA 版本号（`yyyyMMdd`）：客户端先取这几百字节比对，有新版才下整表。
+  // 与 seed-titles.txt.gz 同批提交，保证版本号和内容永远对得上。
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const version = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  const versionTargets = [
+    resolve(ROOT, 'apps/androidtv/app/src/main/assets/seed-version.txt'),
+    resolve(ROOT, 'packages/core/src/seed-version.txt'),
+  ];
+  for (const target of versionTargets) await writeFile(target, `${version}\n`, 'utf8');
+
   const done = Object.entries(progress.done ?? {})
-    .map(([k, v]) => `${k}=${v}页`)
+    .map(([k, v]) => {
+      // 进度值的形状随爬取脚本版本变过：早期是纯数字（已抓页数），后来是
+      // `{pages, total}`。两种都认，别让日志打出 `[object Object]`。
+      if (typeof v === 'number') return `${k}=${v}页`;
+      const pages = v?.pages ?? v?.page;
+      const total = v?.total ?? v?.totalPages;
+      return pages != null ? `${k}=${pages}/${total ?? '?'}页` : `${k}=?`;
+    })
     .join('、');
   log(`已完成：${done || '（无）'}`);
   log(`唯一片名 ${names.length}`);
   log(`纯文本 ${(raw.length / 1048576).toFixed(2)} MB → gzip ${(gz.length / 1048576).toFixed(2)} MB`);
+  log(`OTA 版本号 ${version}`);
   for (const target of targets) log(`已写入 ${target.replace(ROOT + '\\', '').replace(ROOT + '/', '')}`);
 }
 

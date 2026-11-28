@@ -2,11 +2,14 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import {
   DEFAULTS_VERSION,
+  DEFAULT_DISABLED_KEYS,
   DEFAULT_LIVE_DISABLED_KEYS,
   DEFAULT_LIVE_SELECTED_KEYS,
   DEFAULT_LIVE_SOURCES,
+  DEFAULT_SELECTED_KEYS,
   DEFAULT_SOURCES,
   LIVE_SELECTION_VERSION,
+  VOD_SELECTION_VERSION,
 } from './defaults';
 import {
   DEFAULT_SETTINGS,
@@ -284,11 +287,20 @@ export const useAppStore = create<AppState>()(
             s.defaultsVersion < LIVE_SELECTION_VERSION
               ? s.liveSelectedKeys.filter((key) => !DEFAULT_LIVE_DISABLED_KEYS.includes(key))
               : s.liveSelectedKeys;
+          // 点播源同理：v10 起把大陆直连不通的 8 个源默认关掉（5 个连不上、3 个搜索
+          // 被 Cloudflare 挡）。新装用户只勾清单里没标 selected:false 的；老用户升级到
+          // v10 时一次性取消勾选，之后用户自己再打开不会被关掉。
+          const defaultVodSelected = new Set(DEFAULT_SELECTED_KEYS);
+          const vodBase =
+            s.defaultsVersion < VOD_SELECTION_VERSION
+              ? s.selectedKeys.filter((key) => !DEFAULT_DISABLED_KEYS.includes(key))
+              : s.selectedKeys;
           return {
             sources,
-            selectedKeys: [...new Set([...s.selectedKeys, ...added.map((x) => x.key)])].filter((key) =>
-              sources.some((x) => x.key === key)
-            ),
+            // 新增的内置源里既有健康源也有被墙源，只有清单标了默认启用的才勾上。
+            selectedKeys: [
+              ...new Set([...vodBase, ...added.filter((x) => defaultVodSelected.has(x.key)).map((x) => x.key)]),
+            ].filter((key) => sources.some((x) => x.key === key)),
             liveSources,
             // 只勾选清单里「默认启用」的内置源：iptv-org 两条与 Guovin 这类默认关掉的
             // 源虽然进列表，但不参与加载，否则新用户开箱就是一屏死台。

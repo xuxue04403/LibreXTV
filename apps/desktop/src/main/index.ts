@@ -1,7 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { primeSeedTitles, lookupSeed, seedReady, seedSize } from '@librextv/core/seed-titles';
+import { primeSeedTitles, lookupSeed, seedReady, seedSize, seedOrigin } from '@librextv/core/seed-titles';
+import {
+  hasSeedCache,
+  localSeedVersion,
+  pullDailySeedDelta,
+  seedCachePath,
+  updateSeedTableIfNeeded,
+} from './seed-updater';
 import { startMediaProxy, assertAllowedTarget, fetchChecked, readLimited, type MediaProxy } from './proxy';
 import { castToDevice, discoverDevices, parseDeviceDescription, stopCast, type DlnaDevice } from './dlna';
 import { fetchRecommend } from './recommend';
@@ -234,7 +241,32 @@ ipcMain.handle('seed:lookup', (_event, needle: unknown, limit: unknown) => {
   }
 });
 
-ipcMain.handle('seed:info', () => ({ ready: seedReady(), size: seedSize() }));
+ipcMain.handle('seed:info', () => ({
+  ready: seedReady(),
+  size: seedSize(),
+  origin: seedOrigin(),
+  version: localSeedVersion(),
+}));
+
+/**
+ * 每日增量：渲染层把自己启用的源传上来。
+ *
+ * 为什么由渲染层给源：哪些源被勾选是渲染层 store 的状态（用户可以在设置里改），
+ * 主进程不该另存一份。这里只接收 `{url}` 数组，不信任任何其它字段。
+ */
+ipcMain.handle('seed:pull-delta', async (_event, input: unknown) => {
+  const list = Array.isArray(input) ? input : [];
+  const sources = list
+    .filter((x): x is { url: string } => !!x && typeof x === 'object' && typeof (x as { url?: unknown }).url === 'string')
+    .map((x, i) => ({ key: `delta_${i}`, name: x.url, url: x.url }));
+  if (sources.length === 0) return { ok: true as const, added: 0 };
+  try {
+    const added = await pullDailySeedDelta(sources);
+    return { ok: true as const, added };
+  } catch {
+    return { ok: true as const, added: 0 };
+  }
+});
 
 /**
  * 画质探测：渲染层传源配置与影片 ID，主进程负责抓播放列表/分片前缀。
@@ -588,7 +620,13 @@ if (!gotLock) {
     app.setAppUserModelId('org.librextv.desktop');
     // 内置片库在主进程预热：解 gzip + 算 22 万条片名的首字母大约 1 秒，
     // 放到渲染层就阻塞首屏了；且渲染层拿不到 fs。
-    void primeSeedTitles();
+    // 优先读上次 OTA 下来的那份（如果比安装包里的新），没有再读 .gz。
+    void primeSeedTitles(hasSeedCache() ? seedCachePath() : null).then(() => {
+      // 预热完再检查更新：更新要把新数据并进已经建好的倒排表，顺序不能反。
+      // 全部后台跑，失败静默——种子表只是建议来源之一，更新不上就用旧的。
+      // 每日增量得等渲染层告诉主进程「用户启用了哪些源」，见 `seed:pull-delta`。
+      void updateSeedTableIfNeeded().catch(() => false);
+    });
     proxy = await startMediaProxy();
     buildMenu();
     createWindow();

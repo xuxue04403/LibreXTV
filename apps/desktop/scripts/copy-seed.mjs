@@ -8,7 +8,7 @@
  * 少了这个文件不会崩——`loadSeedTitles()` 找不到就保持「未就绪」，搜索退化成只查本地
  * 索引（加片库之前的老行为）。但老片就搜不到了，所以构建时必须带上。
  */
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,3 +27,15 @@ mkdirSync(outDir, { recursive: true });
 copyFileSync(src, dest);
 const kb = Math.round(statSync(dest).size / 1024);
 console.log(`[copy-seed] ${dest}（${kb} KB）`);
+
+// 版本号基线：客户端用它判断「安装包里这份表是哪天的」。
+// 少拷贝它的后果是全新安装的第一次启动必然判成「远端有新版」白下 1.9MB。
+const versionSrc = resolve(here, '../../../packages/core/src/seed-version.txt');
+const versionDest = resolve(outDir, 'seed-version.txt');
+if (existsSync(versionSrc)) {
+  copyFileSync(versionSrc, versionDest);
+  console.log(`[copy-seed] ${versionDest}（${readFileSync(versionSrc, 'utf8').trim()}）`);
+} else {
+  // 不是致命错误：没有基线只是多下一次整表，不该让构建失败
+  console.warn('[copy-seed] 缺少 seed-version.txt，将退化为按 ETag 判断更新');
+}

@@ -99,4 +99,72 @@ class DefaultsSelectionTest {
             Defaults.defaultLiveDisabledKeysFrom(text),
         )
     }
+
+    @Test
+    fun `仓库里的真实清单只默认启用大陆直连跑得通的点播源`() {
+        // 全 17 个源按「列表 + 搜索」双端点实测：9 个两项都通，8 个标 selected:false
+        // （量子/电影天堂/如意/暴风/新浪 双端点都连不上；极速/金鹰/光速 列表通但
+        // 搜索被 Cloudflare 挑战页挡住返回 403）。这里把结论钉死：
+        // 以后有人往清单里加源，忘了想「大陆能不能用」，这条用例就会挂。
+        val text = defaultSourcesText()
+        assertEquals(
+            setOf(
+                "builtin_0", // 非凡资源
+                "builtin_2", // 魔都资源
+                "builtin_3", // 360 资源
+                "builtin_6", // 红牛资源
+                "builtin_9", // 百度资源
+                "builtin_13", // 海海资源
+                "builtin_14", // 西瓜资源
+                "builtin_15", // 爱奇艺
+                "builtin_16", // 魔都动漫
+            ),
+            Defaults.defaultVodSelectedKeysFrom(text),
+        )
+        assertEquals(
+            setOf(
+                "builtin_1", // 量子资源
+                "builtin_4", // 电影天堂
+                "builtin_5", // 极速资源
+                "builtin_7", // 如意资源
+                "builtin_8", // 暴风资源
+                "builtin_10", // 金鹰资源
+                "builtin_11", // 新浪资源
+                "builtin_12", // 光速资源
+            ),
+            Defaults.defaultVodDisabledKeysFrom(text),
+        )
+    }
+
+    @Test
+    fun `默认不启用的点播源要带 note 说明，否则用户以为它坏了`() {
+        val text = defaultSourcesText()
+        val disabled = Defaults.defaultVodDisabledKeysFrom(text)
+        assertTrue("清单里应该有默认不启用的源", disabled.isNotEmpty())
+        // 直接解析文本验 note：`Defaults.load` 需要 Context，这里不必绕那个弯
+        val json = kotlinx.serialization.json.Json.parseToJsonElement(text) as
+            kotlinx.serialization.json.JsonObject
+        val arr = json["sources"] as kotlinx.serialization.json.JsonArray
+        arr.forEachIndexed { index, element ->
+            val obj = element as kotlinx.serialization.json.JsonObject
+            val key = "builtin_$index"
+            if (key in disabled) {
+                val note = (obj["note"] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+                assertTrue("$key 标了 selected:false 却没写 note", note.isNotEmpty())
+            }
+        }
+    }
+
+    private fun defaultSourcesText(): String {
+        val candidates = listOf(
+            java.io.File("src/main/assets/default-sources.json"),
+            java.io.File("app/src/main/assets/default-sources.json"),
+            java.io.File("apps/androidtv/app/src/main/assets/default-sources.json"),
+        )
+        val file = candidates.firstOrNull { it.isFile }
+            ?: org.junit.Assert.fail(
+                "找不到 default-sources.json，已尝试：" + candidates.joinToString("、") { it.absolutePath }
+            ) as java.io.File
+        return file.readText()
+    }
 }

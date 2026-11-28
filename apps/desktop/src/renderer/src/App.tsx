@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { initBridge, resetBridge } from './lib/bridge';
+import { initBridge, resetBridge, seedPullDelta } from './lib/bridge';
+import { DEFAULT_SOURCES } from './lib/defaults';
 import { startCatalogWarmup, stopCatalogWarmup } from './lib/catalog-warmer';
 import { startIndexWarmup, stopIndexWarmup } from './lib/title-index-warmer';
 import { syncDueSubscriptions } from './lib/subscription-sync';
@@ -23,6 +24,23 @@ const NAV: { id: View; icon: IconName; label: string }[] = [
   { id: 'live', icon: 'radio', label: '直播' },
   { id: 'settings', icon: 'sliders', label: '设置' },
 ];
+
+/**
+ * 内置片库的「每日增量」：把当前启用的源报给主进程。
+ *
+ * 采集站按 `vod_time` 倒序，第 1 页就是当天新片。整表 OTA 走 jsDelivr（做的是
+ * 大版本同步），增量走采集站本身（补「打包之后」的新片）。两条一起，新片延迟
+ * 从「等下个版本」降到「当天或次日」。
+ *
+ * 只挑内置源：用户自己加的源可能上千个，全报上去等于每次启动打一轮洪水。
+ */
+function pullSeedDelta(): Promise<number> {
+  const state = useAppStore.getState();
+  const enabled = new Set(state.selectedKeys);
+  const urls = DEFAULT_SOURCES.filter((s) => enabled.has(s.key)).map((s) => s.url);
+  if (urls.length === 0) return Promise.resolve(0);
+  return seedPullDelta(urls);
+}
 
 export function App() {
   const [ready, setReady] = useState(false);
@@ -64,6 +82,9 @@ export function App() {
         startCatalogWarmup();
         // 片名索引：后台低优先级慢慢补，供搜索页的字母检索用
         startIndexWarmup();
+        // 内置片库的每日增量：把当前启用的源报给主进程，由它拉各源第 1 页
+        // （那页就是当天新片）并进内存表。放在最后，别和首屏抢带宽。
+        void pullSeedDelta();
         // 到期的订阅在后台静默同步；每半小时再看一眼，长时间挂机也能刷新
         void syncDueSubscriptions().catch(() => undefined);
         const syncTimer = window.setInterval(() => {
