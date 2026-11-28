@@ -253,10 +253,22 @@ export interface QualityProbeResult {
 /**
  * 画质探测：主进程抓 m3u8 / 分片前缀并解析。
  * 浏览器预览没有该能力，明确报错而不是静默返回「未知」。
+ *
+ * `probeId` 用于之后调 `qualityCancel` 中止它——一次探测能跑十几秒，
+ * 详情页换片时必须把在途的那些停掉，否则它们会一直排队占着连接。
  */
-export async function qualityProbe(source: SourceConfig, vodId: string): Promise<QualityProbeResult> {
+export async function qualityProbe(
+  source: SourceConfig,
+  vodId: string,
+  probeId?: number
+): Promise<QualityProbeResult> {
   if (!window.librextv) throw new Error('画质探测仅在桌面端可用');
-  return window.librextv.qualityProbe({ source, vodId });
+  return window.librextv.qualityProbe({ source, vodId, probeId });
+}
+
+/** 中止一次在途的画质探测。没有该能力的环境（浏览器预览）静默忽略。 */
+export function qualityCancel(probeId: number): void {
+  void window.librextv?.qualityCancel(probeId).catch(() => undefined);
 }
 
 /**

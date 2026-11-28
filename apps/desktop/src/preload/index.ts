@@ -106,8 +106,16 @@ const bridge = {
   ): Promise<{ ok: boolean; items: BridgeRecommendItem[]; error?: string; fetchedAt?: number }> =>
     ipcRenderer.invoke('recommend:fetch', query),
   /** 画质探测：主进程抓 m3u8 / 分片前缀并解析，渲染层只拿结论 */
-  qualityProbe: (input: {    source: { key: string; name: string; url: string; detail?: string; isAdult?: boolean };
+  qualityProbe: (input: {
+    source: { key: string; name: string; url: string; detail?: string; isAdult?: boolean };
     vodId: string;
+    /**
+     * 本次探测的编号，用于 `qualityCancel`。
+     *
+     * 详情页一次为前 8 条候选排队探测，换片/关面板时必须能把在途的那些停掉；
+     * 一个探测能跑十几秒，不停就会一直占着连接拖慢后面的。
+     */
+    probeId?: number;
   }): Promise<{
     ok: boolean;
     height?: number;
@@ -117,6 +125,8 @@ const bridge = {
     retryable: boolean;
     cached: boolean;
   }> => ipcRenderer.invoke('quality:probe', input),
+  /** 中止一次在途的画质探测（编号同 `qualityProbe` 传的 probeId） */
+  qualityCancel: (probeId: number): Promise<void> => ipcRenderer.invoke('quality:cancel', probeId),
   /**
    * 内置片库（拼音首字母 → 中文片名）。
    *

@@ -10,12 +10,25 @@ import {
   type SourceConfig,
   type VideoDetail,
 } from '@librextv/core';
-import { http, qualityProbe, type QualityProbeResult } from '../lib/bridge';
+import { http, qualityCancel, qualityProbe, type QualityProbeResult } from '../lib/bridge';
 import { useAppStore } from '../lib/store';
 import { useToast } from './toast-context';
 import { Icon } from './Icons';
 import { Poster } from './Poster';
 import type { WatchTarget } from '../pages/Watch';
+
+/**
+ * 画质探测的编号。
+ *
+ * 主进程用 `webContents.id:probeId` 做键记住在途的探测，渲染层这边只要保证
+ * 同一时刻派出去的编号不重复即可。模块级计数就够了——probeId 只需在
+ * 「一个窗口的一次会话」内唯一。
+ */
+let probeIdSeq = 0;
+function nextProbeId(): number {
+  probeIdSeq += 1;
+  return probeIdSeq;
+}
 
 interface ProbeInfo {
   probing: boolean;
@@ -96,6 +109,10 @@ export function DetailPanel({
     };
 
     const queue = [...items];
+    // 本轮派出去、还没回来的探测编号。换片时要把它们逐个取消——
+    // 一次探测要抓 m3u8 + 分片前缀 + AES key，最慢能跑十几秒，
+    // 光靠 `alive` 丢弃结果，请求本身仍会一直占着连接拖慢后面那一轮。
+    const probing = new Set<number>();
     const worker = async () => {
       for (;;) {
         const item = queue.shift();
@@ -116,10 +133,16 @@ export function DetailPanel({
           speedError = err instanceof Error ? err.message : '详情获取失败';
         }
         patch(item, { speedMs, speedError });
+        if (!alive) return;
+        const probeId = nextProbeId();
+        probing.add(probeId);
         try {
-          const quality = await qualityProbe(source, item.vodId);
+          const quality = await qualityProbe(source, item.vodId, probeId);
+          // 「已取消」是换片导致的，不该显示成探测失败
+          if (!alive || quality.error === '已取消') continue;
           patch(item, { quality });
         } catch (err) {
+          if (!alive) continue;
           patch(item, {
             quality: {
               ok: false,
@@ -128,7 +151,10 @@ export function DetailPanel({
               cached: false,
             },
           });
+        } finally {
+          probing.delete(probeId);
         }
+        if (!alive) return;
         patch(item, { probing: false });
       }
     };
@@ -137,6 +163,8 @@ export function DetailPanel({
     return () => {
       alive = false;
       controller.abort();
+      for (const id of probing) qualityCancel(id);
+      probing.clear();
     };
   }, [group.items, probeNonce, resolveSource]);
 

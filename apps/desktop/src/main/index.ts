@@ -310,25 +310,57 @@ ipcMain.handle('seed:pull-delta', async (_event, input: unknown) => {
  * 放主进程的原因：m3u8 与分片没有 CORS 头，渲染层 fetch 会被浏览器拦；
  * 且分片只读前缀，不必把几十 MB 的内容搬进渲染层。
  */
-ipcMain.handle('quality:probe', async (_event, input: unknown) => {
+/**
+ * 在途的画质探测，键同样是 `webContents.id:probeId`。
+ *
+ * 详情页一次会为前 8 条候选排队探测，用户一换片或关掉面板，这些请求就该停掉。
+ * 一个探测要抓 m3u8 + 分片前缀 + AES key，跑满能到十几秒；不管的话它们会一直
+ * 占着连接，后面的探测排不上，切走再回来还会被旧结果覆盖。
+ */
+const activeProbes = new Map<string, AbortController>();
+
+ipcMain.handle('quality:probe', async (event, input: unknown) => {
   if (!input || typeof input !== 'object') {
     return { ok: false as const, error: '无效的探测请求', retryable: false, cached: false };
   }
-  const { source, vodId } = input as { source?: unknown; vodId?: unknown };
+  const { source, vodId, probeId } = input as {
+    source?: unknown;
+    vodId?: unknown;
+    probeId?: unknown;
+  };
   if (!source || typeof source !== 'object' || typeof vodId !== 'string') {
     return { ok: false as const, error: '无效的探测请求', retryable: false, cached: false };
   }
+  const controller = new AbortController();
+  const key = typeof probeId === 'number' ? streamKeyOf(event.sender.id, probeId) : '';
+  if (key) {
+    // 同一个 probeId 被复用（渲染层重试同一条）时，先把上一轮掐掉
+    activeProbes.get(key)?.abort();
+    activeProbes.set(key, controller);
+  }
   try {
-    const result = await probeQuality({ source: source as SourceConfig, vodId });
+    const result = await probeQuality({ source: source as SourceConfig, vodId, signal: controller.signal });
     return result;
   } catch (err) {
+    // 主动取消不是失败：界面已经换片了，不该把「已取消」当成探测错误显示出来
+    if (controller.signal.aborted) {
+      return { ok: false as const, error: '已取消', retryable: true, cached: false };
+    }
     return {
       ok: false as const,
       error: err instanceof Error ? err.message : '画质探测失败',
       retryable: false,
       cached: false,
     };
+  } finally {
+    if (key && activeProbes.get(key) === controller) activeProbes.delete(key);
   }
+});
+
+ipcMain.handle('quality:cancel', (event, probeId: number) => {
+  const key = streamKeyOf(event.sender.id, probeId);
+  activeProbes.get(key)?.abort();
+  activeProbes.delete(key);
 });
 
 ipcMain.handle(
