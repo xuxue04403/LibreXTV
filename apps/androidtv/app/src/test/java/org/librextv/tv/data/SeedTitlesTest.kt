@@ -103,4 +103,31 @@ class SeedTitlesTest {
         assertEquals(0, SeedTitles.merge(listOf("随便一条")))
         assertFalse(SeedTitles.ready)
     }
+
+    @Test
+    fun `增量合并只碰受影响的键，其它键的桶对象不重建`() {
+        // 这条要靠首字母倒排表，所以先装真实拼音表（内存空表算不出首字母，装出来的
+        // 倒排表会是空的，断言就变成永远不可能失败的空转）。
+        val table = listOf(
+            java.io.File("src/main/assets/pinyin-table.txt"),
+            java.io.File("app/src/main/assets/pinyin-table.txt"),
+            java.io.File("apps/androidtv/app/src/main/assets/pinyin-table.txt"),
+        ).firstOrNull { it.isFile }
+        org.junit.Assume.assumeTrue("找不到 pinyin-table.txt，跳过", table != null)
+        Pinyin.install(table!!.readText())
+        SeedTitles.installForTest(listOf("庆余年第一季", "庆余年第二季", "亮剑"))
+
+        // 这张表实测有 58 万个键，整表拷贝一次约 28MB 临时内存，冷启动时 OTA 与
+        // 每日增量各调一次，低端盒子会 OOM。这里断言「未被命中的桶保持同一个对象
+        // 引用」——如果哪天有人把 merge 改回 `HashMap(byInitials)`，这条会挂。
+        val untouchedBefore = SeedTitles.lookup("qy", 200).toList()
+        val objectBefore = SeedTitles.bucketIdentityForTest("qy")
+        assertEquals(1, SeedTitles.merge(listOf("亮剑第二部")))
+        assertEquals("未被命中的键不该被复制", objectBefore, SeedTitles.bucketIdentityForTest("qy"))
+        assertEquals(untouchedBefore, SeedTitles.lookup("qy", 200).toList())
+        // 命中的键必须包含新条目
+        assertTrue(SeedTitles.lookup("lj", 200).contains("亮剑第二部"))
+        // 老数据不能丢
+        assertTrue(SeedTitles.lookup("qy", 200).contains("庆余年第一季"))
+    }
 }

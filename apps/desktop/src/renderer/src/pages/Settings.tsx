@@ -168,6 +168,12 @@ function VodSources() {
                 <div className="name">{s.name}</div>
                 <div className="url">{s.url}</div>
                 {s.detail ? <div className="url">详情页：{s.detail}</div> : null}
+                {/* 默认关闭的内置源要解释一句，否则用户以为它坏了 */}
+                {!on && s.note ? (
+                  <div className="url" style={{ color: '#b0892f' }}>
+                    {s.note}
+                  </div>
+                ) : null}
               </div>
               {testResult ? (
                 <span className={`chip ${testResult.startsWith('可用') ? 'ok' : 'err'}`}>{testResult}</span>

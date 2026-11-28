@@ -107,8 +107,11 @@ class Repository(private val net: Net = Net) {
      * 用户在电视上也可能输 `斗罗` 或 `dou`。
      *
      * @param limit 最多返回多少条（遥控器翻一屏 8~12 条就够）
+     * @param adultFilter 是否过滤成人标题。种子表直接来自采集站全量列表、**没有分类信息**，
+     *   只能按片名匹配关键词；不过滤的话「情色」「无码」这类片名会直接出现在建议列表里，
+     *   而用户明明开着成人过滤——那等于过滤形同虚设（实测 22 万条里有 138 条会被命中）。
      */
-    fun suggestTitles(query: String, limit: Int = 12): List<SearchItem> {
+    fun suggestTitles(query: String, limit: Int = 12, adultFilter: Boolean = true): List<SearchItem> {
         val word = query.trim().lowercase()
         if (word.isEmpty()) return emptyList()
         val byPinyin = Pinyin.isQuery(word)
@@ -120,6 +123,9 @@ class Repository(private val net: Net = Net) {
                 // 标题包含（中文/英文都走这条）或首字母命中，任一条成立就算候选
                 item.name.lowercase().contains(word) || (byPinyin && Pinyin.matches(item.name, word))
             }
+            // 与搜索结果同样过一遍成人过滤：本地索引里的条目来自分类/搜索，
+            // 关掉过滤时可能已经混进来，建议列表不能是绕过口子。
+            .filter { item -> !adultFilter || !Parsers.isAdult(item.typeName, item.name, item.isAdult) }
             // 同一部片跨源只留一条：建议行点下去只用来填词，不需要每个源一行
             .distinctBy { it.name }
             .sortedWith(SUGGEST_ORDER(word))
@@ -136,6 +142,9 @@ class Repository(private val net: Net = Net) {
         val seeded = SeedTitles.lookup(word, limit * 6)
             .asSequence()
             .filter { it !in have }
+            // 种子表只有片名、没有分类，只能按标题词判断——这是它能拿到的全部依据，
+            // 但聊胜于无：漏掉一条露骨片名比整块过滤失效更糟。
+            .filter { name -> !adultFilter || !Parsers.isAdult(null, name) }
             .sortedWith(
                 compareByDescending<String> { Pinyin.score(it, word) }
                     .thenBy { it.length }

@@ -546,7 +546,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val local = it.sources.firstOrNull { s -> s.key == d.key }
                 local != null && local.url != d.url && local.url !in removed
             }.associateBy { s -> s.key }
-            val mergedVod = it.sources.map { s -> freshVodByKey[s.key] ?: s }
+            val mergedVod = it.sources.map { s ->
+                val fresh = freshVodByKey[s.key]
+                if (fresh != null) {
+                    fresh
+                } else {
+                    // 老用户升级：条目是 v9 及以前建的，那时还没有 `note` 字段。清单里同一
+                    // key 现在带了「为什么默认不启用」的说明，补进去——否则设置页对老用户
+                    // 永远不解释那些源为什么是关着的（新装用户能看到，老用户看不到）。
+                    val note = vod.firstOrNull { d -> d.key == s.key }?.note
+                    if (s.note == null && note != null) s.copy(note = note) else s
+                }
+            }
             val freshByKey = addedLive.associateBy { s -> s.key }
             val mergedLive = it.liveSources.map { s -> freshByKey[s.key] ?: s } +
                 addedLive.filter { s -> it.liveSources.none { old -> old.key == s.key } }
@@ -963,7 +974,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * 直接点选即可，不必先把整个词打完。
      */
     fun suggestTitles(query: String, limit: Int = 12): List<SearchItem> =
-        runCatching { repo.suggestTitles(query, limit) }
+        runCatching { repo.suggestTitles(query, limit, _data.value.settings.adultFilter) }
             .onFailure { android.util.Log.e("SuggestTitles", "建议查询失败 q=$query", it) }
             .getOrDefault(emptyList())
 

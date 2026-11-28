@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import java.io.BufferedReader
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 
 /**
@@ -44,9 +45,20 @@ object SeedTitles {
      */
     private const val SEED_ASSET = "seed-titles.txt"
 
-    /** 「首字母 → 片名」倒排表；同一个首字母串下可能有几百个片名 */
+    /**
+     * 「首字母 → 片名」倒排表；同一个首字母串下可能有几百个片名。
+     *
+     * 用 [ConcurrentHashMap] 而不是 HashMap：增量合并时**原地**改受影响的键，不做整表
+     * 拷贝。这张表实测有 58 万个键，`HashMap(byInitials)` 一次浅拷贝就要新建 58 万个
+     * Entry（约 28MB 临时内存），而冷启动时 OTA 与每日增量各调一次，叠在 22 万条片名
+     * 之上，低端盒子有 OOM 风险。
+     *
+     * 写入用 `synchronized` 串行化（合并只在后台单线程跑）；读取不加锁——CHM 保证读到
+     * 旧值或新值。**bucket 里的 List 一旦发布就不再修改**（合并只会整体换成一个新
+     * List），所以读侧永远看到自洽的快照。
+     */
     @Volatile
-    private var byInitials: Map<String, List<String>> = emptyMap()
+    private var byInitials: MutableMap<String, MutableList<String>> = ConcurrentHashMap()
 
     /** 全部片名，按原顺序（用于「不按首字母、直接包含」的兜底匹配） */
     @Volatile
@@ -79,6 +91,14 @@ object SeedTitles {
         private set
 
     val size: Int get() = all.size
+
+    /**
+     * 串行化 [merge] 的写入。
+     *
+     * 不能锁 `byInitials` 本身：它在 [loadFrom] / [installForTest] / [clearForTest] 里会被
+     * 整个换掉，锁对象跟着变就锁不住了。用一个固定的对象。
+     */
+    private val mergeLock = Any()
 
     /** 全部片名的快照（在线更新/增量落盘时写文件用） */
     fun allNames(): List<String> = all
@@ -144,7 +164,9 @@ object SeedTitles {
     }
 
     private fun loadFrom(reader: BufferedReader) {
-        val map = HashMap<String, MutableList<String>>(1 shl 17)
+        // 直接建成 ConcurrentHashMap：装载完成后它会被增量合并原地修改，而查询在
+        // UI 线程上跑，普通 HashMap 边 put 边 get 是不安全的。
+        val map = ConcurrentHashMap<String, MutableList<String>>(1 shl 18)
         val plain = ArrayList<String>(240_000)
         val seen = HashSet<String>(240_000)
 
@@ -173,28 +195,35 @@ object SeedTitles {
      */
     fun merge(names: Collection<String>): Int {
         if (!ready) return 0
-        val added = ArrayList<String>()
-        val seen = HashSet(nameSet)
-        for (raw in names) {
-            val name = raw.trim()
-            if (name.isEmpty() || !seen.add(name)) continue
-            added.add(name)
-        }
-        if (added.isEmpty()) return 0
-        val map = HashMap(byInitials)
-        // 倒排表里存的是不可变 List，逐键复制一次代价可控：
-        // 单日增量几十条、涉及的键也就几十个。
-        for (name in added) {
-            for (key in keysOf(name)) {
-                val old = map[key]
-                map[key] = if (old == null) listOf(name) else old + name
+        synchronized(mergeLock) {
+            val seen = HashSet(nameSet)
+            val added = ArrayList<String>()
+            for (raw in names) {
+                val name = raw.trim()
+                if (name.isEmpty() || !seen.add(name)) continue
+                added.add(name)
             }
+            if (added.isEmpty()) return 0
+            // 只动被命中的键：给这一个键换一个新 List，其余 58 万个键保持原引用不动。
+            // 整表拷贝一次要 28MB，这里只碰几十个键。
+            val map = byInitials
+            for (name in added) {
+                for (key in keysOf(name)) {
+                    val old = map[key]
+                    if (old == null) {
+                        map[key] = mutableListOf(name)
+                    } else {
+                        // 不原地 add：读侧可能正拿着这个 List 在遍历，换一个新的更安全。
+                        map[key] = (old + name).toMutableList()
+                    }
+                }
+            }
+            byInitials = map
+            all = all + added
+            nameSet = seen
+            keys = map.size
+            return added.size
         }
-        byInitials = map
-        all = all + added
-        nameSet = seen
-        keys = map.size
-        return added.size
     }
 
     /**
@@ -266,7 +295,7 @@ object SeedTitles {
     /** 仅供单元测试 */
     @androidx.annotation.VisibleForTesting
     fun installForTest(names: List<String>) {
-        val map = HashMap<String, MutableList<String>>()
+        val map = ConcurrentHashMap<String, MutableList<String>>()
         val plain = ArrayList<String>(names.size)
         for (name in names) {
             plain.add(name)
@@ -281,7 +310,7 @@ object SeedTitles {
 
     @androidx.annotation.VisibleForTesting
     fun clearForTest() {
-        byInitials = emptyMap()
+        byInitials = ConcurrentHashMap()
         all = emptyList()
         nameSet = emptySet()
         ready = false
@@ -289,4 +318,13 @@ object SeedTitles {
         keys = 0
         origin = "内置"
     }
+
+    /**
+     * 仅供单元测试：返回某个首字母键下那个 List 的**对象身份**。
+     *
+     * 用来钉住「增量合并不做整表拷贝」——未被命中的键必须还是原来那个对象。
+     * 生产代码不要用。
+     */
+    @androidx.annotation.VisibleForTesting
+    fun bucketIdentityForTest(key: String): Any? = byInitials[key]
 }

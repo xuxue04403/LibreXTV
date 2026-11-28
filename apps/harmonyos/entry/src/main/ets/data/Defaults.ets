@@ -156,7 +156,36 @@ export function mergeDefaults(data: AppData, parsed: DefaultsParsed): AppData {
   const sources: VodSource[] = [];
   for (let i = 0; i < data.sources.length; i++) {
     const s = data.sources[i];
-    sources.push(freshByKey.get(s.key) ?? s);
+    const fresh = freshByKey.get(s.key);
+    if (fresh !== undefined) {
+      sources.push(fresh);
+      continue;
+    }
+    // 老用户升级：条目是 v9 及以前建的，那时还没有 `note` 字段。清单里同一 key 现在
+    // 带了「为什么默认不启用」的说明，补进去——否则设置页对老用户永远不解释那些源
+    // 为什么是关着的（新装用户能看到，老用户看不到）。
+    if (s.note === undefined || s.note.length === 0) {
+      let note: string | undefined = undefined;
+      for (let j = 0; j < parsed.vod.length; j++) {
+        if (parsed.vod[j].key === s.key && parsed.vod[j].note !== undefined) {
+          note = parsed.vod[j].note;
+          break;
+        }
+      }
+      if (note !== undefined && note.length > 0) {
+        sources.push({
+          key: s.key,
+          name: s.name,
+          url: s.url,
+          detail: s.detail,
+          isAdult: s.isAdult,
+          builtin: s.builtin,
+          note: note,
+        });
+        continue;
+      }
+    }
+    sources.push(s);
   }
   for (let i = 0; i < added.length; i++) {
     sources.push(added[i]);

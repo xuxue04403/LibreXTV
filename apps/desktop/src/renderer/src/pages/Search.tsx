@@ -5,6 +5,7 @@ import {
   describeDisabledRemaining,
   describeSourceDisable,
   groupSearchResults,
+  isAdultContent,
   isSourceDisabled,
   normalizeQuery,
   pinyinInitials,
@@ -212,10 +213,14 @@ export function SearchPage({
     []
   );
 
-  const suggestions: SuggestionGroup[] = useMemo(
-    () => suggestFromIndex(pool, draft, { limit: 120 }),
-    [pool, draft]
-  );
+  const suggestions: SuggestionGroup[] = useMemo(() => {
+    const raw = suggestFromIndex(pool, draft, { limit: 120 });
+    // 索引条目来自各源的「最新列表」，扫库时是整页照收的（`runScan` 只解析不筛），
+    // 所以列表里本来就混着成人分类。搜索结果那条路有 `filterAdult`，建议这条以前没有，
+    // 等于「搜出来过滤掉、但键盘旁边先给你看一遍」。
+    if (!settings.adultFilter) return raw;
+    return raw.filter((group) => !isAdultContent(group.typeName, group.name));
+  }, [pool, draft, settings.adultFilter]);
 
   // 索引是否已有内容：`pool` 由 subscribeIndex 驱动，索引长大后这里会跟着变。
   const indexReady = pool.length > 0;
@@ -263,6 +268,9 @@ export function SearchPage({
     for (const name of seedHits) {
       const key = normalizeQuery(name);
       if (taken.has(key)) continue;
+      // 种子表只有片名、没有分类信息。开着成人过滤时，命中关键词的片名不能进建议
+      // 列表——否则「情色」「无码」这类标题会直接摆在字母键盘旁边。
+      if (settings.adultFilter && isAdultContent(undefined, name)) continue;
       taken.add(key);
       extra.push({
         key: `seed:${name}`,
@@ -272,7 +280,7 @@ export function SearchPage({
       });
     }
     return [...suggestions, ...extra];
-  }, [suggestions, seedHits]);
+  }, [suggestions, seedHits, settings.adultFilter]);
 
   /* -------------------------------- 搜索结果 -------------------------------- */
 

@@ -266,7 +266,18 @@ export const useAppStore = create<AppState>()(
           const added = DEFAULT_SOURCES.filter(
             (d) => !existingUrls.has(d.url) && !removed.has(d.url) && !merged.some((x) => x.key === d.key)
           );
-          const sources = [...merged.map((x) => srcFresh.get(x.key) ?? x), ...added];
+          const sources = [
+            ...merged.map((x) => {
+              const fresh = srcFresh.get(x.key);
+              if (fresh) return fresh;
+              // 老用户升级：条目是 v9 及以前建的，那时还没有 `note` 字段。清单里同一 key
+              // 现在带了「为什么默认不启用」的说明，补进去——否则设置页对老用户永远不解释
+              // 那些源为什么是关着的（新装用户能看到，老用户看不到）。
+              const note = DEFAULT_SOURCES.find((d) => d.key === x.key)?.note;
+              return x.note === undefined && note !== undefined ? { ...x, note } : x;
+            }),
+            ...added,
+          ];
           const liveRemoved = removed;
           const addedLive = DEFAULT_LIVE_SOURCES.filter(
             (d) => !s.liveSources.some((x) => x.url === d.url) && !liveRemoved.has(d.url)
