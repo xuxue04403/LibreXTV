@@ -332,7 +332,15 @@ object Parsers {
 
     fun groups(channels: List<LiveChannel>): List<String> {
         val out = LinkedHashSet<String>()
-        channels.forEach { out.add(it.group ?: "未分组") }
+        channels.forEach {
+            val g = it.group ?: "未分组"
+            // 「全部」是界面上的哨兵值（表示不筛选），不是真实分组。
+            // 调用方一律写成 `listOf("全部") + Parsers.groups(...)`，所以清单里
+            // 只要有哪个频道的 group-title 字面就是「全部」，列表里就会出现两个
+            // 一模一样的「全部」；Compose 拿它当 key 时直接抛
+            // Key "全部" was already used 崩掉进程，鸿蒙端的 ForEach 同款。
+            if (g != "全部") out.add(g)
+        }
         return out.toList()
     }
 

@@ -183,6 +183,11 @@ export function collectGroups(channels: LiveChannel[]): string[] {
   const out: string[] = [];
   for (const ch of channels) {
     const g = ch.group || '未分组';
+    // 「全部」是界面上的哨兵值（表示不筛选），不是真实分组。调用方一律写成
+    // `['全部', ...collectGroups(channels)]`，清单里只要有频道把 group-title
+    // 写成「全部」，渲染出来就是两个同名分组：React 会报重复 key，点哪一个
+    // 都等于不筛选。
+    if (g === '全部') continue;
     if (!seen.has(g)) {
       seen.add(g);
       out.push(g);

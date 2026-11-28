@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -149,7 +150,10 @@ fun LiveScreen(vm: AppViewModel, data: AppData) {
                     onClick = { vm.setLiveGroup("全部") },
                 )
             }
-            items(live.groups, key = { it }) { group ->
+            // key 不能直接用分组名：某个频道的 group-title 字面就是「全部」时，
+            // `listOf("全部") + Parsers.groups(...)` 里会出现两个「全部」，
+            // LazyRow 直接抛 Key "全部" was already used 崩掉进程（电视版没传 key 才没暴露）。
+            items(live.groups, key = { "group:$it" }) { group ->
                 PhoneChip(
                     text = "$group ${counts[group] ?: 0}",
                     active = live.selectedGroup == group,
@@ -163,8 +167,13 @@ fun LiveScreen(vm: AppViewModel, data: AppData) {
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(live.statuses, key = { it.first }) { (name, status) ->
-                    PhoneChip("$name · $status", active = status.startsWith("✓"))
+                // key 带上下标：源名允许重复（设置页可以加两个同名不同址的源），
+                // 拿源名当 key 会在同名的瞬间崩掉。
+                itemsIndexed(live.statuses, key = { i, s -> "status:$i:${s.first}" }) { _, pair ->
+                    val (name, status) = pair
+                    // 判「成功」用后缀而非前缀：状态串是「<源名> · N 频道」或「加载失败」，
+                    // 从来没有以 ✓ 开头的形态（电视版用的就是 endsWith("频道")）。
+                    PhoneChip("$name · $status", active = status.endsWith("频道"))
                 }
             }
         }

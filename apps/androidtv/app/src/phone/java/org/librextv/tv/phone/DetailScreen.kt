@@ -177,7 +177,9 @@ fun DetailScreen(vm: AppViewModel, target: Screen.Detail, data: AppData) {
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
-                                    "$index",
+                                    // 必须 +1：别处（电视版、鸿蒙版、播放页角标）都按「第 N 集」从 1 数，
+                                    // 这里写成 0 起会让同一集出现 0 和 1 两种编号。
+                                    "${index + 1}",
                                     color = if (playing) Color(0xFFFFC4B0) else TextPrimary,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )

@@ -172,6 +172,12 @@ export function collectGroups(channels: LiveChannel[]): string[] {
   seen.add('全部');
   for (let i = 0; i < channels.length; i++) {
     const g = channels[i].group ?? '未分组';
+    // 「全部」是哨兵值（不筛选），不是真实分组。上面已经把「全部」预置进 seen，
+    // 这里再显式跳过一次：纯粹是防御——万一以后有人删掉那行 seen.add('全部')，
+    // 比赛谁先想到「重复 key 从哪来」要花很久，驻留一个显式判断更省事。
+    if (g === '全部') {
+      continue;
+    }
     if (!seen.has(g)) {
       seen.add(g);
       out.push(g);

@@ -73,9 +73,14 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
         }
     }
 
+    // 最后一处 distinct() 是必须的：这一行下面用片名本身当 LazyRow 的 key，
+    // 而 search.keyword 会被拼在最前面、历史里也常常有同名片名（刚看完就回来重搜），
+    // 一旦重复 Compose 直接抛 "Key \"...\" was already used." 崩掉进程。
     val suggestions = remember(search.keyword, data.history) {
-        (if (search.keyword.isNotBlank()) listOf(search.keyword) else emptyList()) +
-            data.history.map { it.title }.distinct().take(8)
+        (
+            (if (search.keyword.isNotBlank()) listOf(search.keyword) else emptyList()) +
+                data.history.map { it.title }
+            ).distinct().take(8)
     }
 
     fun submit(word: String) {
@@ -141,7 +146,7 @@ fun SearchScreen(vm: AppViewModel, data: AppData) {
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                rowItems(suggestions, key = { it }) { word ->
+                rowItems(suggestions, key = { "sug:$it" }) { word ->
                     PhoneChip(word, onClick = { submit(word) })
                 }
             }

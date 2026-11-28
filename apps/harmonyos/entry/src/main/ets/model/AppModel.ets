@@ -835,6 +835,12 @@ function collectLiveGroups(channels: LiveChannel[]): string[] {
   seen.add('全部');
   for (let i = 0; i < channels.length; i++) {
     const g = channels[i].group ?? '未分组';
+    // 「全部」是界面上的哨兵值（表示不筛选），不是真实分组。清单里若有频道的
+    // group-title 字面就是「全部」，这里会再 push 一个，LivePage 的分组 ForEach
+    // 拿分组名当 key，直接报重复 key。
+    if (g === '全部') {
+      continue;
+    }
     if (!seen.has(g)) {
       seen.add(g);
       out.push(g);
